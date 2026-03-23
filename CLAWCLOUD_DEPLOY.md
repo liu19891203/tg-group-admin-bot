@@ -7,6 +7,18 @@
 
 这套方案直接复用当前仓库的 `polling` 实现，不需要先把定时任务改写成 `webhook + cron`。
 
+如果你使用的是 ClawCloud `Free` 计划，还要注意一个现实限制：免费额度通常只允许 `1 nodeport`。这意味着你往往不能同时跑一个公网 `admin-web` 和一个单独的 `bot-worker`。
+
+所以免费版推荐优先使用单应用方案：
+
+- `all-in-one`：同一个容器里同时运行 `web_server` 和 `local_polling`
+
+仓库里已经提供了入口：
+
+```bash
+python combined_service.py
+```
+
 ## 必备环境
 
 部署前先准备：
@@ -44,6 +56,40 @@ DOCKERHUB_TOKEN=你的DockerHubAccessToken
 ```
 
 `DOCKERHUB_TOKEN` 建议使用 Docker Hub 的 Access Token，不要直接用密码。
+
+## 免费版单应用方案
+
+用途：
+
+- 提供 `/web` 后台页面
+- 同时运行 Telegram polling 和定时任务
+
+ClawCloud 配置建议：
+
+- Image: `liuliul/tg-group-admin:<你的镜像tag>`
+- Command: `python`
+- Arguments: `combined_service.py`
+- Public Access: 开启
+- Port: `8000`
+- Replicas: `1`
+
+环境变量：
+
+```env
+BOT_TOKEN=你的TelegramBotToken
+ADMIN_USER_ID=你的Telegram用户ID
+KV_REST_API_URL=你的UpstashRedisREST地址
+KV_REST_API_TOKEN=你的UpstashRedisREST令牌
+WEB_SESSION_SECRET=一段随机长字符串
+WEB_COOKIE_SECURE=1
+WEB_APP_URL=https://你的公网域名/web
+```
+
+说明：
+
+- 这是免费版最稳的部署方式，只占一个应用和一个公网入口
+- `WEB_APP_URL` 可以在第一次部署成功、拿到公网地址后，再回填并更新一次
+- 如果你已经升级到 `Hobby` 或更高计划，再优先用下面的双服务方案
 
 ## 服务一：admin-web
 
@@ -138,7 +184,7 @@ WEB_APP_URL=https://你的admin-web域名/web
 3. `git commit -m "..."` 
 4. `git push origin main`
 5. 等 GitHub Actions 推送新镜像完成
-6. 到 ClawCloud 对 `admin-web` 和 `bot-worker` 各点一次更新或重启
+6. 到 ClawCloud 对应用点一次更新或重启
 
 ## 常见问题
 
