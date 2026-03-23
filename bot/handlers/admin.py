@@ -36,6 +36,7 @@ from ..storage.config_store import (
 )
 from ..utils.telegram import get_bot_username, is_admin, normalize_url, safe_answer, safe_edit_message
 from .private_home import handle_private_home_callback, handle_private_home_message, show_private_home
+from ..web.login_bot import parse_web_login_start_arg, show_web_login_prompt
 
 SUPER_ADMIN_ID = model_config.SUPER_ADMIN_ID
 STATE_NONE = model_config.STATE_NONE
@@ -931,9 +932,13 @@ async def show_antispam_menu(update, context, state: dict | None = None, note: s
 async def admin_start(update, context):
     if getattr(update.effective_chat, "type", "") != "private":
         return
+    web_login_request_id = parse_web_login_start_arg((getattr(context, "args", None) or [None])[0])
     user_id = update.effective_user.id
     new_state = {"active_group_id": None, "state": STATE_NONE, "tmp": {}}
     _save_state(user_id, new_state)
+    if web_login_request_id:
+        await show_web_login_prompt(update, context, web_login_request_id)
+        return
     await show_private_home(update, context, new_state)
 
 async def _begin_input(update, context, user_id: int, state: dict, new_state: str, prompt: str, **tmp_updates):
@@ -2076,5 +2081,3 @@ async def admin_callback(update, context):
         return
 
     await safe_answer(query)
-
-

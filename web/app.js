@@ -9,6 +9,7 @@ const state = {
   notice: '',
   noticeType: '',
   previewHtml: '',
+  loginRequest: null,
 };
 
 const root = document.getElementById('app');
@@ -16,6 +17,7 @@ let previewTimer = null;
 let previewRequestId = 0;
 let scheduleItemSeq = 0;
 let moderationRuleSeq = 0;
+let loginPollTimer = null;
 
 function isLoopbackHost() {
   return ['127.0.0.1', 'localhost', '::1'].includes(window.location.hostname);
@@ -50,6 +52,20 @@ function escapeHtml(value) {
     .replaceAll('>', '&gt;')
     .replaceAll('"', '&quot;')
     .replaceAll("'", '&#39;');
+}
+
+function humanizeErrorMessage(message, fallback = '操作失败，请重试') {
+  const value = String(message || '').trim();
+  if (!value) return fallback;
+  const mapped = {
+    bad_request: '请求格式不正确，请刷新后重试。',
+    forbidden: '当前登录请求无效，请重新发起。',
+    expired: '登录请求已过期，请重新发起。',
+    invalid_local_debug_secret: '调试口令不正确。',
+    invalid_telegram_login: 'Telegram 登录失败，请重试。',
+    unauthorized: '登录状态已失效，请重新登录。',
+  };
+  return mapped[value] || fallback;
 }
 
 async function api(path, options = {}) {
@@ -94,6 +110,37 @@ function summaryModule(key) {
   return (state.summary?.modules || []).find((item) => item.key === key) || {};
 }
 
+function stopLoginPolling() {
+  if (loginPollTimer) {
+    window.clearTimeout(loginPollTimer);
+    loginPollTimer = null;
+  }
+}
+
+function clearLoginRequest() {
+  stopLoginPolling();
+  state.loginRequest = null;
+}
+
+function webLoginSettings() {
+  return state.bootstrap?.web_login || {};
+}
+
+function buildWebLoginUrl(requestId) {
+  const username = state.bootstrap?.bot_username || '';
+  if (!username || !requestId) return '';
+  return `https://t.me/${username}?start=weblogin_${requestId}`;
+}
+
+function scheduleLoginPoll(delayMs) {
+  stopLoginPolling();
+  const fallback = Number(webLoginSettings().poll_interval_ms || 2000);
+  const nextDelay = Math.max(500, Number(delayMs || fallback || 2000));
+  loginPollTimer = window.setTimeout(() => {
+    void pollWebLoginStatus();
+  }, nextDelay);
+}
+
 async function loadBootstrap() {
   state.bootstrap = await api('/api/web/bootstrap');
 }
@@ -111,13 +158,14 @@ async function loadSession() {
       state.currentGroupId = groups[0]?.id || null;
     }
     if (requestedGroupId != null && !hasRequestedGroup) {
-      state.notice = '当前群组不可管理，已切换到默认群组';
+      state.notice = '当前群组不可管理，已切换到默认群组。';
       state.noticeType = 'error';
     }
     if (state.currentGroupId) {
       syncGroupLocation();
       await loadGroup(state.currentGroupId, state.currentModuleKey);
     }
+    clearLoginRequest();
   } catch (error) {
     if (error.status === 401) {
       state.me = null;
@@ -182,6 +230,28 @@ function clearNotice() {
   updateNotice();
 }
 
+function renderRemoteLoginPanel() {
+  const request = state.loginRequest;
+  if (!request) {
+    return `
+      <div class="login-widget-box local-debug-box">
+        <div class="subtle">点击下方按钮后，页面会打开 Telegram，并让 bot 用当前 Telegram 账号完成后台登录确认。</div>
+        <button class="primary-btn" data-action="start-web-login">打开 Telegram 一键登录</button>
+      </div>`;
+  }
+  const expiresAt = Number(request.expires_at || 0);
+  const remainingSec = expiresAt > 0 ? Math.max(0, Math.ceil((expiresAt * 1000 - Date.now()) / 1000)) : webLoginSettings().ttl_sec || 600;
+  return `
+    <div class="login-widget-box local-debug-box">
+      <div class="subtle">已生成登录请求，请在 Telegram 中点击 bot 发来的“确认登录后台”。</div>
+      <div class="subtle">请求剩余时间: ${escapeHtml(String(remainingSec))} 秒</div>
+      <div class="inline-actions">
+        <button class="primary-btn" data-action="open-web-login-telegram">打开 Telegram</button>
+        <button class="secondary-btn" data-action="start-web-login">重新生成请求</button>
+      </div>
+    </div>`;
+}
+
 function renderLoginPanel() {
   const localDebug = state.bootstrap?.local_debug_login || {};
   if (isLoopbackHost()) {
@@ -193,28 +263,27 @@ function renderLoginPanel() {
     }
     return `
       <div class="login-widget-box local-debug-box">
-        <div class="subtle">Telegram 登录组件无法在 localhost 或 127.0.0.1 上使用。本机调试登录仅限当前机器，并且需要输入已配置的调试口令。</div>
+        <div class="subtle">公网环境已切换为 Telegram bot 确认登录。本机调试模式仍然保留口令登录。</div>
         <input type="password" id="local-debug-secret" placeholder="请输入本机调试口令" />
         <button class="primary-btn" data-action="local-debug-login">使用本机调试登录</button>
       </div>`;
   }
-  return `<div id="telegram-login-box" class="login-widget-box">正在加载 Telegram 登录组件...</div>`;
+  return renderRemoteLoginPanel();
 }
 
 function renderLogin() {
-
   root.className = 'app-shell';
   root.innerHTML = `
     <div class="login-shell">
       <div class="login-card">
         <span class="hero-tag">浅蓝风格管理后台</span>
         <h1 class="hero-title">群组管理后台</h1>
-        <p class="hero-copy">你可以在公网域名下使用 Telegram 登录，也可以在当前机器上使用本机调试登录。网页后台与 Telegram 端共用同一套存储配置。</p>
+        <p class="hero-copy">后台登录已改为 Telegram bot 一键确认。浏览器发起请求后，请在 Telegram 里用当前账号确认，无需输入手机号和验证码。</p>
         <div class="login-grid">
           <div class="soft-panel">
             <h3 class="section-title">当前能力</h3>
             <ul class="bullet-list">
-              <li>Telegram 登录与会话管理</li>
+              <li>Telegram 私聊确认登录</li>
               <li>24 个模块导航</li>
               <li>浅蓝风格后台界面</li>
               <li>消息预览面板</li>
@@ -225,26 +294,88 @@ function renderLogin() {
           <div class="soft-panel">
             <h3 class="section-title">登录</h3>
             ${renderLoginPanel()}
+            <div data-notice-host>${renderNotice()}</div>
           </div>
         </div>
       </div>
     </div>`;
-  mountTelegramWidget();
 }
 
-function mountTelegramWidget() {
-  const target = document.getElementById('telegram-login-box');
-  if (!target || !state.bootstrap?.bot_username || isLoopbackHost()) return;
-  target.innerHTML = '';
-  const script = document.createElement('script');
-  script.async = true;
-  script.src = 'https://telegram.org/js/telegram-widget.js?22';
-  script.setAttribute('data-telegram-login', state.bootstrap.bot_username);
-  script.setAttribute('data-size', 'large');
-  script.setAttribute('data-userpic', 'false');
-  script.setAttribute('data-request-access', 'write');
-  script.setAttribute('data-onauth', 'window.onTelegramAuth(user)');
-  target.appendChild(script);
+async function startWebLogin() {
+  try {
+    clearNotice();
+    stopLoginPolling();
+    const payload = {
+      requested_group_id: state.requestedGroupId,
+      origin: window.location.origin,
+    };
+    const result = await api('/api/web/auth/request-login', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    state.loginRequest = {
+      ...result,
+      status: 'pending',
+      login_url: buildWebLoginUrl(result.request_id),
+    };
+    render();
+    scheduleLoginPoll(400);
+    if (state.loginRequest.login_url) {
+      const popup = window.open(state.loginRequest.login_url, '_blank', 'noopener');
+      if (!popup) {
+        showNotice('已生成登录请求，请点击“打开 Telegram”继续。', 'ok');
+      }
+    }
+  } catch (error) {
+    clearLoginRequest();
+    showNotice(humanizeErrorMessage(error.message, '创建登录请求失败，请重试。'), 'error');
+  }
+}
+
+async function openWebLoginTelegram() {
+  const loginUrl = state.loginRequest?.login_url || '';
+  if (!loginUrl) {
+    showNotice('当前没有可用的登录请求，请重新发起。', 'error');
+    return;
+  }
+  window.open(loginUrl, '_blank', 'noopener');
+}
+
+async function pollWebLoginStatus() {
+  if (!state.loginRequest?.request_id || !state.loginRequest?.browser_token) return;
+  try {
+    const result = await api('/api/web/auth/poll-login', {
+      method: 'POST',
+      body: JSON.stringify({
+        request_id: state.loginRequest.request_id,
+        browser_token: state.loginRequest.browser_token,
+      }),
+    });
+    const status = String(result?.status || 'pending');
+    if (status === 'approved') {
+      clearNotice();
+      clearLoginRequest();
+      await loadSession();
+      render();
+      return;
+    }
+    if (status === 'expired') {
+      clearLoginRequest();
+      render();
+      showNotice('登录请求已过期，请重新发起登录。', 'error');
+      return;
+    }
+    state.loginRequest = {
+      ...state.loginRequest,
+      expires_at: Number(result?.expires_at || state.loginRequest.expires_at || 0),
+    };
+    render();
+    scheduleLoginPoll(Number(result?.poll_interval_ms || webLoginSettings().poll_interval_ms || 2000));
+  } catch (error) {
+    clearLoginRequest();
+    render();
+    showNotice(humanizeErrorMessage(error.message, '登录状态检查失败，请重新发起。'), 'error');
+  }
 }
 
 async function localDebugLogin() {
@@ -258,17 +389,6 @@ async function localDebugLogin() {
     showNotice(humanizeErrorMessage(error.message, '本机调试登录失败，请检查本地服务日志'), 'error');
   }
 }
-
-window.onTelegramAuth = async (user) => {
-  try {
-    await api('/api/web/auth/telegram', { method: 'POST', body: JSON.stringify(user) });
-    clearNotice();
-    await loadSession();
-    render();
-  } catch (error) {
-    showNotice(humanizeErrorMessage(error.message, 'Telegram 登录失败，请重试'), 'error');
-  }
-};
 
 function groups() {
   return state.me?.groups || [];
@@ -1888,6 +2008,14 @@ document.addEventListener('click', async (event) => {
   const button = event.target.closest('[data-action]');
   if (!button) return;
   const action = button.dataset.action;
+    if (action === 'start-web-login') {
+    await startWebLogin();
+    return;
+  }
+  if (action === 'open-web-login-telegram') {
+    await openWebLoginTelegram();
+    return;
+  }
   if (action === 'local-debug-login') {
     await localDebugLogin();
     return;
@@ -1897,6 +2025,7 @@ document.addEventListener('click', async (event) => {
     state.me = null;
     state.summary = null;
     state.modulePayload = null;
+    clearLoginRequest();
     clearNotice();
     render();
     return;

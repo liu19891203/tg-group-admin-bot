@@ -18,6 +18,7 @@ from bot.web.auth import (
     read_session_from_cookie_header,
     verify_telegram_login,
 )
+from bot.web.login_flow import consume_web_login_request, create_web_login_request, web_login_settings
 from bot.web.permissions import ensure_group_access, get_manageable_groups
 from bot.web.schemas import list_modules
 from bot.web.service import build_group_summary, build_module_runtime, load_module_payload, render_preview, save_module_payload
@@ -67,6 +68,7 @@ async def _bootstrap_payload(local_debug_login: dict | None = None):
             'bot_id': int(me.id),
             'modules': list_modules(),
             'local_debug_login': dict(local_debug_login or local_debug_login_settings()),
+            'web_login': web_login_settings(),
         }
 
     return await _with_bot(_action)
@@ -222,6 +224,52 @@ class handler(BaseHTTPRequestHandler):
             token = issue_session(payload)
             self._send_json(200, {'ok': True}, cookie_header=cookie_header_for_session(token))
             return
+        if parsed.path == '/api/web/auth/request-login':
+            try:
+                payload = self._read_json()
+            except Exception:
+                self._send_json(400, {'error': 'bad_request'})
+                return
+            request = create_web_login_request(
+                requested_group_id=payload.get('requested_group_id'),
+                origin=payload.get('origin'),
+            )
+            self._send_json(200, {
+                'ok': True,
+                'request_id': request['request_id'],
+                'browser_token': request['browser_token'],
+                'expires_at': request['expires_at'],
+                'poll_interval_ms': web_login_settings()['poll_interval_ms'],
+            })
+            return
+        if parsed.path == '/api/web/auth/poll-login':
+            try:
+                payload = self._read_json()
+            except Exception:
+                self._send_json(400, {'error': 'bad_request'})
+                return
+            result = consume_web_login_request(
+                str(payload.get('request_id') or ''),
+                str(payload.get('browser_token') or ''),
+            )
+            status = str(result.get('status') or 'pending')
+            if status == 'approved':
+                token = issue_session(result['user'])
+                self._send_json(
+                    200,
+                    {
+                        'ok': True,
+                        'status': 'approved',
+                        'requested_group_id': result.get('requested_group_id'),
+                    },
+                    cookie_header=cookie_header_for_session(token),
+                )
+                return
+            if status == 'forbidden':
+                self._send_json(403, {'error': 'forbidden'})
+                return
+            self._send_json(200, result)
+            return
         if parsed.path == '/api/web/auth/local-debug':
             try:
                 payload = self._read_json()
@@ -279,4 +327,3 @@ class handler(BaseHTTPRequestHandler):
             self._send_json(200, result['payload'])
             return
         self._send_text(404, 'not found')
-

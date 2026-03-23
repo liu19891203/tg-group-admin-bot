@@ -1,4 +1,4 @@
-import logging
+﻿import logging
 
 from .admin import admin_callback
 from ..services.verify import (
@@ -23,6 +23,7 @@ from ..services.extra_features import (
     handle_lottery_join_callback,
 )
 from ..utils.telegram import safe_answer
+from ..web.login_bot import handle_web_login_callback
 
 logger = logging.getLogger(__name__)
 CALLBACK_TEXT_LIMIT = 180
@@ -221,6 +222,10 @@ async def handle_verify_answer(update, context, chat_id: int, user_id: int, inde
 
 async def callback_router(update, context):
     data = update.callback_query.data or ""
+    if data.startswith("weblogin:"):
+        handled = await handle_web_login_callback(update, context)
+        if handled:
+            return
     if data.startswith("admin:") or data.startswith("adminx:"):
         await admin_callback(update, context)
         return
@@ -258,5 +263,3 @@ async def callback_router(update, context):
     if data.startswith("vcb:") or data.startswith("wb:") or data.startswith("arb:") or data.startswith("smb:") or data.startswith("ivb:") or data.startswith("rcb:"):
         await handle_custom_button_callback(update, context)
         return
-
-
