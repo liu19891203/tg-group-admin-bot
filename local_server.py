@@ -1,5 +1,5 @@
 import os
-from http.server import HTTPServer
+from http.server import ThreadingHTTPServer
 
 from api.tg_bot import handler, log_startup_state
 from bot.app import build_app
@@ -11,7 +11,7 @@ def main():
     lock_path = acquire_process_lock(owner="local_server")
     build_app()
     log_startup_state()
-    server = HTTPServer(("0.0.0.0", port), handler)
+    server = ThreadingHTTPServer(("0.0.0.0", port), handler)
     print(f"Local bot lock acquired: {lock_path}", flush=True)
     print(f"Local webhook server listening on http://127.0.0.1:{port}", flush=True)
     server.serve_forever()

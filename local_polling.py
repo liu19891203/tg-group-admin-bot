@@ -5,8 +5,8 @@ from telegram import Update
 
 from bot.app import build_app
 from bot.models.config import BOT_TOKEN, WEBHOOK_SECRET
-from bot.storage.kv import KV_ENABLED, LOCAL_KV_PATH
 from bot.services.extra_features import scheduled_message_worker
+from bot.storage.kv import KV_ENABLED, LOCAL_KV_PATH
 from bot.utils.process_lock import ProcessLockError, acquire_process_lock
 
 
@@ -23,7 +23,12 @@ async def _restore_webhook(app, webhook_url: str):
     await app.bot.set_webhook(**kwargs)
 
 
-async def main():
+async def run_polling(
+    *,
+    restore_webhook_on_exit: bool,
+    owner: str,
+    timeout_sec: int | None = None,
+):
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN is required")
     if not KV_ENABLED:
@@ -33,18 +38,20 @@ async def main():
             flush=True,
         )
 
-    lock_path = acquire_process_lock(owner="local_polling")
-    print(f"Local bot lock acquired: {lock_path}", flush=True)
+    lock_path = acquire_process_lock(owner=owner)
+    print(f"Bot lock acquired ({owner}): {lock_path}", flush=True)
 
     app = build_app()
     await app.initialize()
 
     webhook = await app.bot.get_webhook_info()
     webhook_url = webhook.url or ""
-    timeout_sec = max(0, int(os.environ.get("POLL_TIMEOUT_SEC", "0") or 0))
+    wait_timeout = timeout_sec
+    if wait_timeout is None:
+        wait_timeout = max(0, int(os.environ.get("POLL_TIMEOUT_SEC", "0") or 0))
 
     if webhook_url:
-        print(f"Temporarily disabling webhook: {webhook_url}", flush=True)
+        print(f"Disabling webhook before polling: {webhook_url}", flush=True)
         await app.bot.delete_webhook(drop_pending_updates=False)
 
     worker_task = None
@@ -52,10 +59,10 @@ async def main():
         await app.start()
         worker_task = asyncio.create_task(scheduled_message_worker(app), name="scheduled-message-worker")
         await app.updater.start_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=False)
-        print("Local polling started. Send real Telegram messages to the bot now.", flush=True)
-        if timeout_sec > 0:
-            print(f"Polling timeout: {timeout_sec}s", flush=True)
-            await asyncio.sleep(timeout_sec)
+        print(f"Polling started ({owner}).", flush=True)
+        if wait_timeout > 0:
+            print(f"Polling timeout: {wait_timeout}s", flush=True)
+            await asyncio.sleep(wait_timeout)
         else:
             await asyncio.Event().wait()
     finally:
@@ -74,8 +81,15 @@ async def main():
             await app.stop()
         except RuntimeError:
             pass
-        await _restore_webhook(app, webhook_url)
+        if restore_webhook_on_exit:
+            await _restore_webhook(app, webhook_url)
+        elif webhook_url:
+            print("Skipping webhook restore for persistent polling runtime.", flush=True)
         await app.shutdown()
+
+
+async def main():
+    await run_polling(restore_webhook_on_exit=True, owner="local_polling")
 
 
 if __name__ == "__main__":

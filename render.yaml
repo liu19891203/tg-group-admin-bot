@@ -7,7 +7,7 @@ services:
     dockerContext: .
     dockerfilePath: ./Dockerfile
     autoDeploy: true
-    healthCheckPath: /web
+    healthCheckPath: /healthz
     envVars:
       - key: BOT_TOKEN
         sync: false
@@ -29,7 +29,7 @@ services:
     region: singapore
     dockerContext: .
     dockerfilePath: ./Dockerfile
-    dockerCommand: python local_polling.py
+    dockerCommand: python polling_worker.py
     autoDeploy: true
     envVars:
       - key: BOT_TOKEN

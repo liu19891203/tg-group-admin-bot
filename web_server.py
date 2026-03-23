@@ -1,9 +1,9 @@
 import os
-from http.server import HTTPServer
+from http.server import ThreadingHTTPServer
 
-from api.web import handler
 from bot.app import build_app
 from bot.storage.kv import KV_ENABLED, LOCAL_KV_PATH
+from cloud_web import handler
 
 
 def main():
@@ -15,8 +15,8 @@ def main():
             "Deployed admin-web and bot-worker will not share config without KV_REST_API_URL and KV_REST_API_TOKEN.",
             flush=True,
         )
-    server = HTTPServer(("0.0.0.0", port), handler)
-    print(f"Admin web listening on http://0.0.0.0:{port}", flush=True)
+    server = ThreadingHTTPServer(("0.0.0.0", port), handler)
+    print(f"Admin web listening on http://0.0.0.0:{port} (health: /healthz)", flush=True)
     server.serve_forever()
 
 

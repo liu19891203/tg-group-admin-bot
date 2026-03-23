@@ -19,6 +19,7 @@ __pycache__/
 
 scratch*.tmp
 tmp_*.py
+!tmp_runtime_patch_admin.py
 tmp_*.txt
 tmp_*.json
 admin_decompiled.py

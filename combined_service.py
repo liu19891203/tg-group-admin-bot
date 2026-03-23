@@ -1,11 +1,11 @@
 import asyncio
 import os
 import threading
-from http.server import HTTPServer
+from http.server import ThreadingHTTPServer
 
-from api.web import handler as web_handler
 from bot.storage.kv import KV_ENABLED, LOCAL_KV_PATH
-from local_polling import main as polling_main
+from cloud_web import handler as web_handler
+from local_polling import run_polling
 
 
 def _run_web_server() -> None:
@@ -16,15 +16,15 @@ def _run_web_server() -> None:
             "Web admin and polling worker will not share config without KV_REST_API_URL and KV_REST_API_TOKEN.",
             flush=True,
         )
-    server = HTTPServer(("0.0.0.0", port), web_handler)
-    print(f"Combined web listening on http://0.0.0.0:{port}", flush=True)
+    server = ThreadingHTTPServer(("0.0.0.0", port), web_handler)
+    print(f"Combined web listening on http://0.0.0.0:{port} (health: /healthz)", flush=True)
     server.serve_forever()
 
 
 def main() -> None:
     web_thread = threading.Thread(target=_run_web_server, name="web-server", daemon=True)
     web_thread.start()
-    asyncio.run(polling_main())
+    asyncio.run(run_polling(restore_webhook_on_exit=False, owner="combined_service"))
 
 
 if __name__ == "__main__":
