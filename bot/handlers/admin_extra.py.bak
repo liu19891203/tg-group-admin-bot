@@ -1,0 +1,918 @@
+from __future__ import annotations
+
+import html
+import time
+
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.constants import ParseMode
+
+from ..services.extra_features import get_active_lottery, load_schedule_items, parse_schedule_message_input, publish_lottery, save_schedule_items
+from ..services.membership import group_plan_label, schedule_limit_for_group
+from ..storage.config_store import get_group_config, save_admin_state, save_group_config
+from ..utils.telegram import safe_answer, safe_edit_message
+
+
+MENU_ROUTES = {}
+SCHEDULE_DRAFTS: dict[int, dict] = {}
+
+
+def _btn(label: str, data: str):
+    return InlineKeyboardButton(label, callback_data=data)
+
+
+def _escape(value: str) -> str:
+    return html.escape(str(value or ""))
+
+
+def _preview(value: str, fallback: str = "Not set", limit: int = 40) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return fallback
+    return text if len(text) <= limit else text[: limit - 1] + "..."
+
+
+def _checked(enabled: bool) -> str:
+    return "[x]" if enabled else "[ ]"
+
+
+def _chosen(enabled: bool) -> str:
+    return "[x]" if enabled else "( )"
+
+
+def _toggle_notice(enabled: bool) -> str:
+    return "Enabled" if enabled else "Disabled"
+
+def _normalize_buttons(buttons) -> list[dict]:
+    rows = []
+    for item in list(buttons or []):
+        if not isinstance(item, dict):
+            continue
+        try:
+            row = max(0, int(item.get("row", 0) or 0))
+        except (TypeError, ValueError):
+            row = 0
+        rows.append(
+            {
+                "text": str(item.get("text") or "鎸夐挳"),
+                "type": str(item.get("type") or "url"),
+                "value": str(item.get("value") or ""),
+                "row": row,
+            }
+        )
+    return rows
+
+
+
+def _normalize_message_payload(data: dict | None) -> dict:
+    payload = dict(data or {})
+    return {
+        "text": str(payload.get("text") or ""),
+        "photo_file_id": str(payload.get("photo_file_id") or ""),
+        "buttons": _normalize_buttons(payload.get("buttons") or []),
+    }
+
+
+
+def _normalize_schedule_draft(data: dict | None = None) -> dict:
+    payload = _normalize_message_payload(data)
+    try:
+        interval_sec = int((data or {}).get("interval_sec", 3600) or 3600)
+    except (TypeError, ValueError):
+        interval_sec = 3600
+    payload["interval_sec"] = max(60, interval_sec)
+    return payload
+
+
+
+def _draft_target(user_id: int) -> str:
+    return f"schedule_draft:{int(user_id)}"
+
+
+
+def _parse_draft_target(target: str) -> int | None:
+    text = str(target or "")
+    if not text.startswith("schedule_draft:"):
+        return None
+    try:
+        return int(text.split(":", 1)[1])
+    except (IndexError, ValueError):
+        return None
+
+
+
+def _get_schedule_item_by_id(group_id: int, schedule_id: int):
+    items = load_schedule_items(group_id)
+    for idx, item in enumerate(items):
+        try:
+            item_id = int(item.get("id") or 0)
+        except (TypeError, ValueError):
+            item_id = 0
+        if item_id == schedule_id:
+            return idx, item, items
+    return -1, None, items
+
+
+
+def _rich_target_meta(target: str) -> dict | None:
+    if target == "invite_notify":
+        return {
+            "title": "閭€璇锋垚鍔熼€氱煡璁剧疆",
+            "back": "adminx:invite:menu",
+            "prompt_module": "invite",
+            "hint": "鎴愬憳閫氳繃閭€璇峰叆缇ゅ悗锛屽彧鍙戦€佽繖涓€鏉℃秷鎭紝鏀寔鍥剧墖銆佹枃鏈拰鎸夐挳銆?,
+        }
+    if target == "related_comment":
+        return {
+            "title": "鎶㈠崰璇勮鍖烘秷鎭缃?,
+            "back": "adminx:related:menu",
+            "prompt_module": "related",
+            "hint": "鍏宠仈棰戦亾娑堟伅杞彂鍒扮兢閲屽悗锛屾満鍣ㄤ汉浼氬湪璇ユ秷鎭笅鏂瑰洖澶嶈繖涓€鏉″瘜娑堟伅銆?,
+        }
+    if target.startswith("schedule:"):
+        return {
+            "title": "瀹氭椂娑堟伅缂栬緫",
+            "back": "adminx:schedule:list",
+            "prompt_module": "schedule",
+            "hint": "瀹氭椂娑堟伅浼氫互鍗曟潯娑堟伅鍙戦€侊細鍥剧墖鍦ㄩ《閮紝鏂囨湰鍦ㄤ腑闂达紝鎸夐挳鍦ㄤ笅鏂广€?,
+        }
+    if _parse_draft_target(target) is not None:
+        return {
+            "title": "鏂板缓瀹氭椂娑堟伅",
+            "back": "adminx:schedule:menu",
+            "prompt_module": "schedule",
+            "hint": "瀹氭椂娑堟伅浼氫互鍗曟潯娑堟伅鍙戦€侊細鍥剧墖鍦ㄩ《閮紝鏂囨湰鍦ㄤ腑闂达紝鎸夐挳鍦ㄤ笅鏂广€?,
+        }
+    return None
+
+
+
+def get_rich_message_target(group_id: int, target: str):
+    draft_user_id = _parse_draft_target(target)
+    if draft_user_id is not None:
+        return _normalize_schedule_draft(SCHEDULE_DRAFTS.get(draft_user_id))
+    if target == "invite_notify":
+        cfg = get_group_config(group_id).get("invite_links", {}) or {}
+        return _normalize_message_payload(
+            {
+                "text": cfg.get("notify_text") or "",
+                "photo_file_id": cfg.get("notify_photo_file_id") or "",
+                "buttons": cfg.get("notify_buttons") or [],
+            }
+        )
+    if target == "related_comment":
+        cfg = get_group_config(group_id).get("related_channel", {}) or {}
+        return _normalize_message_payload(
+            {
+                "text": cfg.get("occupy_comment_text") or "",
+                "photo_file_id": cfg.get("occupy_comment_photo_file_id") or "",
+                "buttons": cfg.get("occupy_comment_buttons") or [],
+            }
+        )
+    if target.startswith("schedule:"):
+        try:
+            schedule_id = int(target.split(":", 1)[1])
+        except (IndexError, ValueError):
+            return None
+        _, item, _ = _get_schedule_item_by_id(group_id, schedule_id)
+        return _normalize_schedule_draft(item) if item else None
+    return None
+
+
+
+def save_rich_message_target(group_id: int, target: str, payload: dict) -> bool:
+    draft_user_id = _parse_draft_target(target)
+    message = _normalize_message_payload(payload)
+    if draft_user_id is not None:
+        current = _normalize_schedule_draft(SCHEDULE_DRAFTS.get(draft_user_id))
+        current.update(message)
+        SCHEDULE_DRAFTS[draft_user_id] = _normalize_schedule_draft(current)
+        return True
+    if target == "invite_notify":
+        cfg = get_group_config(group_id)
+        invite_cfg = dict(cfg.get("invite_links", {}) or {})
+        invite_cfg["notify_text"] = message["text"]
+        invite_cfg["notify_photo_file_id"] = message["photo_file_id"]
+        invite_cfg["notify_buttons"] = message["buttons"]
+        cfg["invite_links"] = invite_cfg
+        save_group_config(group_id, cfg)
+        return True
+    if target == "related_comment":
+        cfg = get_group_config(group_id)
+        related_cfg = dict(cfg.get("related_channel", {}) or {})
+        related_cfg["occupy_comment_text"] = message["text"]
+        related_cfg["occupy_comment_photo_file_id"] = message["photo_file_id"]
+        related_cfg["occupy_comment_buttons"] = message["buttons"]
+        cfg["related_channel"] = related_cfg
+        save_group_config(group_id, cfg)
+        return True
+    if target.startswith("schedule:"):
+        try:
+            schedule_id = int(target.split(":", 1)[1])
+        except (IndexError, ValueError):
+            return False
+        idx, item, items = _get_schedule_item_by_id(group_id, schedule_id)
+        if item is None or idx < 0:
+            return False
+        item["text"] = message["text"]
+        item["photo_file_id"] = message["photo_file_id"]
+        item["buttons"] = message["buttons"]
+        items[idx] = item
+        save_schedule_items(group_id, items)
+        return True
+    return False
+
+
+
+def _state_with(base_state: dict | None, **kwargs):
+    state = dict(base_state or {})
+    state.update(kwargs)
+    return state
+
+
+def _save_state(user_id: int, state: dict):
+    save_admin_state(user_id, state)
+
+
+def _group_id(state: dict | None) -> int:
+    try:
+        return int((state or {}).get("active_group_id") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+async def _send_or_edit(update, text: str, reply_markup=None):
+    if getattr(update, "callback_query", None):
+        return await safe_edit_message(update.callback_query, text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+    if update.effective_message:
+        return await update.effective_message.reply_text(
+            text,
+            reply_markup=reply_markup,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+        )
+    return None
+
+
+def _prompt_markup(module: str):
+    return InlineKeyboardMarkup([[_btn("Cancel input", f"adminx:cancel_input:{module}")]])
+
+
+async def _begin_input(update, user_id: int, state: dict, new_state: str, module: str, prompt: str):
+    next_state = _state_with(state, state=new_state)
+    _save_state(user_id, next_state)
+    await _send_or_edit(update, prompt, _prompt_markup(module))
+
+
+def _nested_set(data: dict, path: tuple[str, ...], value):
+    current = data
+    for key in path[:-1]:
+        node = current.get(key)
+        if not isinstance(node, dict):
+            node = {}
+            current[key] = node
+        current = node
+    current[path[-1]] = value
+
+
+def _toggle(data: dict, path: tuple[str, ...]) -> bool:
+    current = data
+    for key in path[:-1]:
+        node = current.get(key)
+        if not isinstance(node, dict):
+            node = {}
+            current[key] = node
+        current = node
+    new_value = not bool(current.get(path[-1], False))
+    current[path[-1]] = new_value
+    return new_value
+
+
+def _toggle_config(group_id: int, path: tuple[str, ...]) -> bool:
+    cfg = get_group_config(group_id)
+    enabled = _toggle(cfg, path)
+    save_group_config(group_id, cfg)
+    return enabled
+
+
+async def _show_menu(module_name: str, update, context, state: dict):
+    func = MENU_ROUTES.get(module_name)
+    if func:
+        return await func(update, context, state)
+    await _send_or_edit(update, f"Unknown module: {module_name}")
+
+
+async def show_rich_message_editor(update, context, state: dict, target: str):
+    del context
+    group_id = _group_id(state)
+    meta = _rich_target_meta(target)
+    payload = get_rich_message_target(group_id, target) if group_id else None
+    if not meta or payload is None:
+        await _send_or_edit(update, "娑堟伅閰嶇疆涓嶅瓨鍦ㄦ垨宸茶鍒犻櫎銆?)
+        return
+
+    lines = [
+        meta["title"],
+        f"鏂囨湰: {_escape(_preview(payload.get('text', ''), '鏈缃?, 120))}",
+        f"鍥剧墖: {'宸茶缃? if payload.get('photo_file_id') else '鏈缃?}",
+        f"鎸夐挳鏁伴噺: {len(payload.get('buttons', []) or [])}",
+        meta["hint"],
+    ]
+    rows = [
+        [_btn("璁剧疆鏂囨湰", f"adminx:rich:text:{target}"), _btn("璁剧疆鍥剧墖", f"adminx:rich:photo:{target}")],
+        [_btn("娓呴櫎鍥剧墖", f"adminx:rich:clear_photo:{target}"), _btn("璁剧疆鎸夐挳", f"adminx:rich:buttons:{target}")],
+    ]
+
+    draft_user_id = _parse_draft_target(target)
+    if draft_user_id is not None or str(target).startswith("schedule:"):
+        interval_min = max(1, int(payload.get("interval_sec", 3600) or 3600) // 60)
+        lines.insert(4, f"闂撮殧: 姣?{interval_min} 鍒嗛挓")
+        rows.append([_btn("璁剧疆闂撮殧", f"adminx:rich:interval:{target}")])
+        if draft_user_id is not None:
+            rows.append([_btn("淇濆瓨瀹氭椂娑堟伅", f"adminx:rich:save:{target}")])
+        else:
+            try:
+                schedule_id = int(str(target).split(":", 1)[1])
+            except (IndexError, ValueError):
+                schedule_id = 0
+            idx, item, _ = _get_schedule_item_by_id(group_id, schedule_id)
+            if item is not None and idx >= 0:
+                next_at = int(item.get("next_at", 0) or 0)
+                next_text = time.strftime("%m-%d %H:%M", time.localtime(next_at)) if next_at > 0 else "鏈畨鎺?
+                lines.insert(1, f"鐘舵€? {'宸插惎鐢? if item.get('enabled', True) else '宸插仠鐢?}")
+                lines.insert(6, f"涓嬫鍙戦€? {next_text}")
+            rows.append([_btn("鍚敤/鍋滅敤", f"adminx:rich:schedule:toggle:{schedule_id}"), _btn("鍒犻櫎", f"adminx:rich:schedule:delete:{schedule_id}")])
+    rows.append([_btn("杩斿洖", meta["back"])])
+    await _send_or_edit(update, "\n".join(lines), InlineKeyboardMarkup(rows))
+
+
+async def show_ad_filter_menu(update, context, state: dict):
+    del context
+    group_id = _group_id(state)
+    cfg = get_group_config(group_id).get("ad_filter", {}) or {}
+    lines = [
+        "Ad filter",
+        f"Nickname filter: {_checked(cfg.get('nickname_enabled', False))}",
+        f"Sticker filter: {_checked(cfg.get('sticker_enabled', False))}",
+        f"Message filter: {_checked(cfg.get('message_enabled', False))}",
+        f"Block channel mask: {_checked(cfg.get('block_channel_mask', False))}",
+    ]
+    rows = [
+        [_btn(f"{_checked(cfg.get('nickname_enabled', False))} Nickname filter", "adminx:ad:toggle:nickname_enabled")],
+        [_btn(f"{_checked(cfg.get('sticker_enabled', False))} Sticker filter", "adminx:ad:toggle:sticker_enabled")],
+        [_btn(f"{_checked(cfg.get('message_enabled', False))} Message filter", "adminx:ad:toggle:message_enabled")],
+        [_btn(f"{_checked(cfg.get('block_channel_mask', False))} Block channel mask", "adminx:ad:toggle:block_channel_mask")],
+        [_btn("Back", "admin:main")],
+    ]
+    await _send_or_edit(update, "\n".join(lines), InlineKeyboardMarkup(rows))
+
+
+async def show_command_gate_menu(update, context, state: dict):
+    del context
+    group_id = _group_id(state)
+    gate = get_group_config(group_id).get("command_gate", {}) or {}
+    keys = ["sign", "profile", "warn", "help", "config", "ban", "kick", "mute"]
+    rows = [[_btn(f"{_checked(gate.get(key, False))} {key}", f"adminx:cmd:toggle:{key}")] for key in keys]
+    rows.append([_btn("Back", "admin:main")])
+    await _send_or_edit(update, "Command gate", InlineKeyboardMarkup(rows))
+
+
+async def show_crypto_menu(update, context, state: dict):
+    del context
+    group_id = _group_id(state)
+    crypto_cfg = get_group_config(group_id).get("crypto", {}) or {}
+    lines = [
+        "Crypto",
+        f"Wallet query: {_checked(crypto_cfg.get('wallet_query_enabled', True))}",
+        f"Price push: {_checked(crypto_cfg.get('push_enabled', False))}",
+    ]
+    rows = [
+        [_btn(f"{_checked(crypto_cfg.get('wallet_query_enabled', True))} Wallet query", "adminx:crypto:toggle:wallet_query_enabled")],
+        [_btn(f"{_checked(crypto_cfg.get('push_enabled', False))} Price push", "adminx:crypto:toggle:push_enabled")],
+        [_btn("Back", "admin:main")],
+    ]
+    await _send_or_edit(update, "\n".join(lines), InlineKeyboardMarkup(rows))
+
+
+async def show_related_menu(update, context, state: dict):
+    del context
+    group_id = _group_id(state)
+    cfg = get_group_config(group_id).get("related_channel", {}) or {}
+    rows = [
+        [_btn(f"{_checked(cfg.get('cancel_top_pin', False))} Cancel top pin", "adminx:related:toggle:cancel_top_pin")],
+        [_btn(f"{_checked(cfg.get('occupy_comment', False))} Occupy comment", "adminx:related:toggle:occupy_comment")],
+        [_btn("Comment message", "adminx:related:prompt:occupy_comment_text")],
+        [_btn("Back", "admin:main")],
+    ]
+    text = "\n".join([
+        "Related channel",
+        f"Comment text: {_escape(_preview(cfg.get('occupy_comment_text', '')))}",
+    ])
+    await _send_or_edit(update, text, InlineKeyboardMarkup(rows))
+
+
+async def show_invite_menu(update, context, state: dict):
+    del context
+    group_id = _group_id(state)
+    cfg = get_group_config(group_id).get("invite_links", {}) or {}
+    rows = [
+        [_btn(f"{_checked(cfg.get('enabled', False))} Enable invite links", "adminx:invite:toggle:enabled")],
+        [_btn(f"{_checked(cfg.get('notify_enabled', False))} Group notify", "adminx:invite:toggle:notify_enabled")],
+        [_btn(f"{_checked(cfg.get('join_review', False))} Join review", "adminx:invite:toggle:join_review")],
+        [_btn("Notify message", "adminx:invite:prompt:notify_text")],
+        [_btn("Reward points", "adminx:invite:prompt:reward_points"), _btn("Query command", "adminx:invite:prompt:query_command")],
+        [_btn("Today rank cmd", "adminx:invite:prompt:today_rank_command"), _btn("Month rank cmd", "adminx:invite:prompt:month_rank_command")],
+        [_btn("Total rank cmd", "adminx:invite:prompt:total_rank_command"), _btn("Auto delete sec", "adminx:invite:prompt:auto_delete_sec")],
+        [_btn("Back", "admin:main")],
+    ]
+    text = "\n".join([
+        "Invite links",
+        f"Notify text: {_escape(_preview(cfg.get('notify_text', '')))}",
+        f"Reward points: {int(cfg.get('reward_points', 0) or 0)}",
+    ])
+    await _send_or_edit(update, text, InlineKeyboardMarkup(rows))
+
+
+async def show_member_menu(update, context, state: dict):
+    del context
+    group_id = _group_id(state)
+    cfg = get_group_config(group_id).get("member_watch", {}) or {}
+    rows = [
+        [_btn(f"{_checked(cfg.get('nickname_change_detect', False))} Nickname change detect", "adminx:member:toggle:nickname_change_detect")],
+        [_btn(f"{_checked(cfg.get('nickname_change_notice', False))} Nickname change notice", "adminx:member:toggle:nickname_change_notice")],
+        [_btn("Back", "admin:main")],
+    ]
+    await _send_or_edit(update, "Member watch", InlineKeyboardMarkup(rows))
+
+
+async def show_language_menu(update, context, state: dict):
+    del context
+    group_id = _group_id(state)
+    cfg = get_group_config(group_id).get("language_whitelist", {}) or {}
+    rows = [
+        [_btn(f"{_checked(cfg.get('enabled', False))} Enable language whitelist", "adminx:lang:toggle:enabled")],
+        [_btn("Set allowed list", "adminx:lang:prompt:allowed")],
+        [_btn("Back", "admin:main")],
+    ]
+    allowed = ", ".join(cfg.get("allowed", []) or []) or "(empty)"
+    await _send_or_edit(update, f"Language whitelist\nAllowed: {allowed}", InlineKeyboardMarkup(rows))
+
+
+async def show_schedule_menu(update, context, state: dict):
+    del context
+    group_id = _group_id(state)
+    items = load_schedule_items(group_id)
+    enabled_count = sum(1 for item in items if item.get("enabled", True))
+    limit = schedule_limit_for_group(group_id)
+    lines = [
+        "鈴?瀹氭椂娑堟伅",
+        "",
+        f"褰撳墠濂楅: {group_plan_label(group_id)}",
+        f"褰撳墠鍏辨湁 {len(items)}/{limit} 鏉″畾鏃舵秷鎭紝宸插惎鐢?{enabled_count} 鏉°€?,
+        "娣诲姞鏂板畾鏃舵秷鎭悗锛屼細杩涘叆缁熶竴缂栬緫鍣紝鍙垎鍒缃枃鏈€佸浘鐗囥€佹寜閽拰鍙戦€侀棿闅斻€?,
+        "娑堟伅浠嶇劧浠ュ崟鏉℃秷鎭彂閫侊細鍥剧墖鍦ㄩ《閮紝鏂囨湰鍦ㄤ腑闂达紝鎸夐挳鍦ㄤ笅鏂广€?,
+    ]
+    if len(items) >= limit:
+        lines.append("宸茶揪鍒板綋鍓嶅椁愪笂闄愶紝缁垂鍚庢墠鍙户缁柊澧炲畾鏃舵秷鎭€?)
+    rows = [
+        [_btn("娣诲姞瀹氭椂娑堟伅", "adminx:schedule:add")],
+        [_btn("鍏ㄩ儴瀹氭椂娑堟伅", "adminx:schedule:list")],
+        [_btn("杩斿洖", "admin:main")],
+    ]
+    await _send_or_edit(update, "\n".join(lines), InlineKeyboardMarkup(rows))
+
+
+async def show_schedule_list_menu(update, context, state: dict):
+    del context
+    group_id = _group_id(state)
+    items = load_schedule_items(group_id)
+    lines = ["鈴?鍏ㄩ儴瀹氭椂娑堟伅", ""]
+    rows = []
+    if not items:
+        lines.append("鏆傛棤瀹氭椂娑堟伅銆?)
+    else:
+        for idx, item in enumerate(items):
+            interval_min = max(1, int(item.get("interval_sec", 0) or 0) // 60)
+            next_at = int(item.get("next_at", 0) or 0)
+            next_text = time.strftime("%m-%d %H:%M", time.localtime(next_at)) if next_at > 0 else "鏈畨鎺?
+            preview = _escape(_preview(item.get("text", ""), "(浠呭浘鐗?鎸夐挳)", 24))
+            photo_flag = "鏈夊浘" if item.get("photo_file_id") else "鏃犲浘"
+            button_count = len(item.get("buttons", []) or [])
+            lines.append(f"{idx + 1}. {_checked(item.get('enabled', True))} {preview}")
+            lines.append(f"   姣?{interval_min} 鍒嗛挓锛屼笅娆?{next_text}")
+            lines.append(f"   {photo_flag} / 鎸夐挳 {button_count} 涓?)
+            rows.append([_btn("缂栬緫娑堟伅", f"adminx:schedule:edit:{idx}"), _btn("鍚敤/鍋滅敤", f"adminx:schedule:toggle:{idx}")])
+            rows.append([_btn("鍒犻櫎", f"adminx:schedule:delete:{idx}")])
+    rows.append([_btn("杩斿洖", "adminx:schedule:menu")])
+    await _send_or_edit(update, "\n".join(lines), InlineKeyboardMarkup(rows))
+
+
+async def show_lottery_menu(update, context, state: dict):
+    del context
+    group_id = _group_id(state)
+    cfg = get_group_config(group_id).get("lottery", {}) or {}
+    active = get_active_lottery(group_id)
+    lines = [
+        "Lottery",
+        f"Enabled: {_checked(cfg.get('enabled', False))}",
+        f"Query command: {_escape(str(cfg.get('query_command') or 'lottery'))}",
+    ]
+    if active:
+        lines.append(f"Active: {_escape(_preview(active.get('title', ''), 'Lottery', 60))}")
+        lines.append(f"Participants: {len(active.get('participants') or [])}")
+    else:
+        lines.append("Active: none")
+    rows = [
+        [_btn(f"{_checked(cfg.get('enabled', False))} Enable lottery", "adminx:lottery:toggle:enabled")],
+        [_btn("Publish lottery", "adminx:lottery:publish")],
+        [_btn("Back", "admin:main")],
+    ]
+    await _send_or_edit(update, "\n".join(lines), InlineKeyboardMarkup(rows))
+
+async def show_verified_placeholder(update, context, state: dict):
+    del context
+    group_id = _group_id(state)
+    cfg = get_group_config(group_id).get("verified_user", {}) or {}
+    rows = [
+        [_btn(f"{_checked(cfg.get('enabled', False))} Enable verified user module", "adminx:verified:toggle:enabled")],
+        [_btn("Back", "admin:main")],
+    ]
+    lines = [
+        "Verified users",
+        f"Module enabled: {_checked(cfg.get('enabled', False))}",
+        "This source rebuild currently exposes the module switch here; detailed user management still lives in Web.",
+    ]
+    await _send_or_edit(update, "\n".join(lines), InlineKeyboardMarkup(rows))
+
+
+MENU_ROUTES.update(
+    {
+        "ad": show_ad_filter_menu,
+        "cmd": show_command_gate_menu,
+        "crypto": show_crypto_menu,
+        "invite": show_invite_menu,
+        "member": show_member_menu,
+        "related": show_related_menu,
+        "schedule": show_schedule_menu,
+        "lang": show_language_menu,
+        "verified": show_verified_placeholder,
+        "lottery": show_lottery_menu,
+    }
+)
+
+
+_PROMPT_ROUTES = {
+    "adminx:invite:prompt:reward_points": ("x:invite:reward_points", "invite", "璇疯緭鍏ュ鍔辩Н鍒?),
+    "adminx:invite:prompt:query_command": ("x:invite:query_command", "invite", "璇疯緭鍏ユ煡璇㈠懡浠?),
+    "adminx:invite:prompt:today_rank_command": ("x:invite:today_rank_command", "invite", "璇疯緭鍏ヤ粖鏃ユ鍗曞懡浠?),
+    "adminx:invite:prompt:month_rank_command": ("x:invite:month_rank_command", "invite", "璇疯緭鍏ユ湰鏈堟鍗曞懡浠?),
+    "adminx:invite:prompt:total_rank_command": ("x:invite:total_rank_command", "invite", "璇疯緭鍏ユ€绘鍛戒护"),
+    "adminx:invite:prompt:auto_delete_sec": ("x:invite:auto_delete_sec", "invite", "璇疯緭鍏ヨ嚜鍔ㄥ垹闄ょ鏁?),
+    "adminx:lang:prompt:allowed": ("x:lang:allowed", "lang", "璇疯緭鍏ュ厑璁哥殑璇█浠ｇ爜锛屼娇鐢ㄩ€楀彿鍒嗛殧"),
+}
+
+
+_VALUE_ROUTES = {
+    "x:related:occupy_comment_text": (("related_channel", "occupy_comment_text"), "related", lambda value: value.strip() or "Occupy comment"),
+    "x:invite:notify_text": (("invite_links", "notify_text"), "invite", lambda value: value.strip() or "{userName} joined via invite"),
+    "x:invite:reward_points": (("invite_links", "reward_points"), "invite", lambda value: max(0, int(value))),
+    "x:invite:query_command": (("invite_links", "query_command"), "invite", lambda value: value.strip() or "/link"),
+    "x:invite:today_rank_command": (("invite_links", "today_rank_command"), "invite", lambda value: value.strip() or "today_rank"),
+    "x:invite:month_rank_command": (("invite_links", "month_rank_command"), "invite", lambda value: value.strip() or "month_rank"),
+    "x:invite:total_rank_command": (("invite_links", "total_rank_command"), "invite", lambda value: value.strip() or "total_rank"),
+    "x:invite:auto_delete_sec": (("invite_links", "auto_delete_sec"), "invite", lambda value: max(0, int(value))),
+    "x:lang:allowed": (("language_whitelist", "allowed"), "lang", lambda value: [part.strip() for part in value.split(",") if part.strip()]),
+}
+
+
+async def handle_admin_extra_message(update, context, state: dict, msg_text: str) -> bool:
+    user_id = update.effective_user.id
+    group_id = _group_id(state)
+    current_state = str((state or {}).get("state") or "")
+    if not group_id:
+        await update.effective_message.reply_text("璇峰厛閫夋嫨缇ょ粍")
+        return True
+
+    if current_state == "x:schedule:add":
+        photo_file_id = ""
+        photos = getattr(update.effective_message, "photo", None) or []
+        if photos:
+            photo_file_id = photos[-1].file_id
+        try:
+            item = parse_schedule_message_input((msg_text or "").strip(), photo_file_id=photo_file_id)
+        except Exception as exc:
+            await update.effective_message.reply_text(str(exc))
+            return True
+        items = load_schedule_items(group_id)
+        limit = schedule_limit_for_group(group_id)
+        if len(items) >= limit:
+            await update.effective_message.reply_text(f"褰撳墠濂楅鏈€澶氭敮鎸?{limit} 鏉″畾鏃舵秷鎭€?)
+            return True
+        items.append(item)
+        save_schedule_items(group_id, items)
+        new_state = _state_with(state, state=None, tmp={})
+        _save_state(user_id, new_state)
+        await show_schedule_list_menu(update, context, new_state)
+        return True
+
+    if current_state.startswith("x:rich:text:") or current_state.startswith("x:rich:photo:"):
+        target = current_state.split(":", 3)[-1]
+        payload = get_rich_message_target(group_id, target)
+        if payload is None:
+            await update.effective_message.reply_text("娑堟伅閰嶇疆涓嶅瓨鍦ㄦ垨宸茶鍒犻櫎銆?)
+            return True
+        if current_state.startswith("x:rich:text:"):
+            payload["text"] = (msg_text or "").strip()
+        else:
+            photos = getattr(update.effective_message, "photo", None) or []
+            if not photos:
+                await update.effective_message.reply_text("璇峰彂閫佸浘鐗囥€?)
+                return True
+            payload["photo_file_id"] = photos[-1].file_id
+        if not save_rich_message_target(group_id, target, payload):
+            await update.effective_message.reply_text("淇濆瓨澶辫触锛岃绋嶅悗鍐嶈瘯銆?)
+            return True
+        new_state = _state_with(state, state=None, tmp={})
+        _save_state(user_id, new_state)
+        await show_rich_message_editor(update, context, new_state, target)
+        return True
+
+    if current_state.startswith("x:schedule:interval:"):
+        target = current_state.split("x:schedule:interval:", 1)[1]
+        try:
+            minutes = int((msg_text or "").strip())
+        except ValueError:
+            await update.effective_message.reply_text("璇疯緭鍏ユ暣鏁板垎閽?)
+            return True
+        interval_sec = max(60, minutes * 60)
+        draft_user_id = _parse_draft_target(target)
+        if draft_user_id is not None:
+            draft = _normalize_schedule_draft(SCHEDULE_DRAFTS.get(draft_user_id))
+            draft["interval_sec"] = interval_sec
+            SCHEDULE_DRAFTS[draft_user_id] = draft
+        else:
+            try:
+                schedule_id = int(str(target).split(":", 1)[1])
+            except (IndexError, ValueError):
+                schedule_id = 0
+            idx, item, items = _get_schedule_item_by_id(group_id, schedule_id)
+            if item is None or idx < 0:
+                await update.effective_message.reply_text("瀹氭椂娑堟伅涓嶅瓨鍦?)
+                return True
+            item["interval_sec"] = interval_sec
+            item["next_at"] = int(time.time()) + interval_sec
+            items[idx] = item
+            save_schedule_items(group_id, items)
+        new_state = _state_with(state, state=None, tmp={})
+        _save_state(user_id, new_state)
+        await show_rich_message_editor(update, context, new_state, target)
+        return True
+
+    if current_state == "x:lottery:publish":
+        try:
+            await publish_lottery(context, group_id, user_id, msg_text)
+        except Exception as exc:
+            await update.effective_message.reply_text(str(exc))
+            return True
+        new_state = _state_with(state, state=None, tmp={})
+        _save_state(user_id, new_state)
+        await show_lottery_menu(update, context, new_state)
+        return True
+    route = _VALUE_ROUTES.get(current_state)
+    if not route:
+        return False
+    path, module_name, transform = route
+    cfg = get_group_config(group_id)
+    try:
+        value = transform(msg_text)
+    except Exception:
+        await update.effective_message.reply_text("杈撳叆鏍煎紡閿欒")
+        return True
+    _nested_set(cfg, path, value)
+    save_group_config(group_id, cfg)
+    new_state = _state_with(state, state=None, tmp={})
+    _save_state(user_id, new_state)
+    await _show_menu(module_name, update, context, new_state)
+    return True
+
+
+async def handle_admin_extra_callback(update, context, state: dict) -> bool:
+    query = getattr(update, "callback_query", None)
+    data = getattr(query, "data", "") or ""
+    if not data.startswith("adminx:"):
+        return False
+
+    user_id = update.effective_user.id
+    group_id = _group_id(state)
+    parts = data.split(":")
+    target_draft = _draft_target(user_id)
+
+    if data.startswith("adminx:cancel_input:"):
+        current_state = str((state or {}).get("state") or "")
+        if current_state.startswith("x:rich:"):
+            target = current_state.split(":", 3)[-1]
+            new_state = _state_with(state, state=None, tmp={})
+            _save_state(user_id, new_state)
+            await show_rich_message_editor(update, context, new_state, target)
+            return True
+        if current_state.startswith("x:schedule:interval:"):
+            target = current_state.split("x:schedule:interval:", 1)[1]
+            new_state = _state_with(state, state=None, tmp={})
+            _save_state(user_id, new_state)
+            await show_rich_message_editor(update, context, new_state, target)
+            return True
+        new_state = _state_with(state, state=None, tmp={})
+        _save_state(user_id, new_state)
+        module_name = data.rsplit(":", 1)[-1]
+        await _show_menu(module_name, update, context, new_state)
+        return True
+
+    if group_id:
+        if data == "adminx:invite:prompt:notify_text":
+            await show_rich_message_editor(update, context, state, "invite_notify")
+            return True
+        if data == "adminx:related:prompt:occupy_comment_text":
+            await show_rich_message_editor(update, context, state, "related_comment")
+            return True
+
+    if data in _PROMPT_ROUTES:
+        next_state, module_name, prompt = _PROMPT_ROUTES[data]
+        await _begin_input(update, user_id, state, next_state, module_name, prompt)
+        return True
+
+    if len(parts) >= 3 and parts[2] == "menu":
+        await _show_menu(parts[1], update, context, state)
+        return True
+
+    if len(parts) >= 4 and parts[2] == "toggle" and group_id:
+        module_name = parts[1]
+        key = parts[3]
+        path_map = {
+            "ad": ("ad_filter", key),
+            "cmd": ("command_gate", key),
+            "crypto": ("crypto", key),
+            "related": ("related_channel", key),
+            "invite": ("invite_links", key),
+            "member": ("member_watch", key),
+            "lang": ("language_whitelist", key),
+            "verified": ("verified_user", key),
+            "lottery": ("lottery", key),
+        }
+        path = path_map.get(module_name)
+        if path:
+            enabled = _toggle_config(group_id, path)
+            await safe_answer(query, _toggle_notice(enabled), show_alert=True)
+            await _show_menu(module_name, update, context, state)
+            return True
+
+    if group_id and data == "adminx:schedule:add":
+        items = load_schedule_items(group_id)
+        limit = schedule_limit_for_group(group_id)
+        if len(items) >= limit:
+            await safe_answer(query, f"褰撳墠濂楅鏈€澶氭敮鎸?{limit} 鏉″畾鏃舵秷鎭?, show_alert=True)
+            await show_schedule_menu(update, context, state)
+            return True
+        SCHEDULE_DRAFTS[user_id] = _normalize_schedule_draft({"interval_sec": 3600})
+        await show_rich_message_editor(update, context, state, target_draft)
+        return True
+
+    if group_id and data == "adminx:schedule:list":
+        await show_schedule_list_menu(update, context, state)
+        return True
+
+    if group_id and data.startswith("adminx:schedule:edit:"):
+        items = load_schedule_items(group_id)
+        try:
+            idx = int(data.split(":")[-1])
+        except ValueError:
+            idx = -1
+        if not (0 <= idx < len(items)):
+            await safe_answer(query, "瀹氭椂娑堟伅涓嶅瓨鍦?, show_alert=True)
+            return True
+        await show_rich_message_editor(update, context, state, f"schedule:{int(items[idx].get('id') or 0)}")
+        return True
+
+    if group_id and len(parts) >= 4 and parts[1] == "schedule" and parts[2] in {"toggle", "delete"}:
+        items = load_schedule_items(group_id)
+        try:
+            idx = int(parts[3])
+        except ValueError:
+            idx = -1
+        if not (0 <= idx < len(items)):
+            await safe_answer(query, "瀹氭椂娑堟伅涓嶅瓨鍦?, show_alert=True)
+            return True
+        if parts[2] == "toggle":
+            items[idx]["enabled"] = not items[idx].get("enabled", True)
+            save_schedule_items(group_id, items)
+            await safe_answer(query, _toggle_notice(bool(items[idx].get("enabled", True))), show_alert=True)
+        else:
+            del items[idx]
+            save_schedule_items(group_id, items)
+            await safe_answer(query, "宸插垹闄?, show_alert=True)
+        await show_schedule_list_menu(update, context, state)
+        return True
+
+    if group_id and data.startswith("adminx:rich:schedule:toggle:"):
+        try:
+            schedule_id = int(data.split(":")[-1])
+        except ValueError:
+            schedule_id = 0
+        idx, item, items = _get_schedule_item_by_id(group_id, schedule_id)
+        if item is None or idx < 0:
+            await safe_answer(query, "瀹氭椂娑堟伅涓嶅瓨鍦?, show_alert=True)
+            return True
+        item["enabled"] = not item.get("enabled", True)
+        items[idx] = item
+        save_schedule_items(group_id, items)
+        await safe_answer(query, _toggle_notice(bool(item.get("enabled", True))), show_alert=True)
+        await show_rich_message_editor(update, context, state, f"schedule:{schedule_id}")
+        return True
+
+    if group_id and data.startswith("adminx:rich:schedule:delete:"):
+        try:
+            schedule_id = int(data.split(":")[-1])
+        except ValueError:
+            schedule_id = 0
+        idx, item, items = _get_schedule_item_by_id(group_id, schedule_id)
+        if item is None or idx < 0:
+            await safe_answer(query, "瀹氭椂娑堟伅涓嶅瓨鍦?, show_alert=True)
+            return True
+        items.pop(idx)
+        save_schedule_items(group_id, items)
+        await safe_answer(query, "宸插垹闄?, show_alert=True)
+        await show_schedule_list_menu(update, context, state)
+        return True
+
+    if group_id and data.startswith("adminx:rich:"):
+        action = parts[2] if len(parts) >= 3 else ""
+        target = ":".join(parts[3:]) if len(parts) >= 4 else ""
+        meta = _rich_target_meta(target)
+        if action == "text" and meta:
+            await _begin_input(update, user_id, state, f"x:rich:text:{target}", meta["prompt_module"], "璇疯緭鍏ユ秷鎭枃鏈?)
+            return True
+        if action == "photo" and meta:
+            await _begin_input(update, user_id, state, f"x:rich:photo:{target}", meta["prompt_module"], "璇峰彂閫佹秷鎭浘鐗?)
+            return True
+        if action == "clear_photo":
+            payload = get_rich_message_target(group_id, target)
+            if payload is None:
+                await safe_answer(query, "娑堟伅閰嶇疆涓嶅瓨鍦?, show_alert=True)
+                return True
+            payload["photo_file_id"] = ""
+            save_rich_message_target(group_id, target, payload)
+            await show_rich_message_editor(update, context, state, target)
+            return True
+        if action == "buttons":
+            from . import admin as admin_module
+
+            new_state = admin_module._state_with(state, state=admin_module.STATE_BTN_TEXT, tmp={"group_id": group_id, "btn_target": f"rich:{target}"})
+            admin_module._save_state(user_id, new_state)
+            await _send_or_edit(update, "璇疯緭鍏ユ寜閽枃瀛?)
+            return True
+        if action == "interval" and meta:
+            new_state = _state_with(state, state=f"x:schedule:interval:{target}", tmp={})
+            _save_state(user_id, new_state)
+            await _send_or_edit(update, "璇疯緭鍏ュ彂閫侀棿闅斿垎閽熸暟", _prompt_markup(meta["prompt_module"]))
+            return True
+        if action == "save":
+            draft_user_id = _parse_draft_target(target)
+            if draft_user_id is None:
+                return True
+            items = load_schedule_items(group_id)
+            limit = schedule_limit_for_group(group_id)
+            if len(items) >= limit:
+                await safe_answer(query, f"褰撳墠濂楅鏈€澶氭敮鎸?{limit} 鏉″畾鏃舵秷鎭?, show_alert=True)
+                await show_schedule_menu(update, context, state)
+                return True
+            draft = _normalize_schedule_draft(SCHEDULE_DRAFTS.get(draft_user_id))
+            if not draft.get("text") and not draft.get("photo_file_id") and not draft.get("buttons"):
+                await safe_answer(query, "瀹氭椂娑堟伅鑷冲皯瑕佹湁鏂囨湰銆佸浘鐗囨垨鎸夐挳", show_alert=True)
+                await show_rich_message_editor(update, context, state, target)
+                return True
+            interval_sec = int(draft.get("interval_sec") or 3600)
+            item = {
+                "text": draft.get("text") or "",
+                "photo_file_id": draft.get("photo_file_id") or "",
+                "buttons": draft.get("buttons") or [],
+                "interval_sec": interval_sec,
+                "next_at": int(time.time()) + interval_sec,
+                "enabled": True,
+            }
+            items.append(item)
+            save_schedule_items(group_id, items)
+            SCHEDULE_DRAFTS.pop(draft_user_id, None)
+            new_state = _state_with(state, state=None, tmp={})
+            _save_state(user_id, new_state)
+            await safe_answer(query, "宸蹭繚瀛?, show_alert=True)
+            await show_schedule_list_menu(update, context, new_state)
+            return True
+
+    if data == "adminx:lottery:menu":
+        await show_lottery_menu(update, context, state)
+        return True
+
+    if data == "adminx:lottery:publish":
+        await _begin_input(update, user_id, state, "x:lottery:publish", "lottery", "Enter lottery text as: prize title | winner count")
+        return True
+    return False
+
+

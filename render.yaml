@@ -1,0 +1,44 @@
+services:
+  - type: web
+    name: tg-group-admin-web
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerContext: .
+    dockerfilePath: ./Dockerfile
+    autoDeploy: true
+    healthCheckPath: /web
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: ADMIN_USER_ID
+        sync: false
+      - key: KV_REST_API_URL
+        sync: false
+      - key: KV_REST_API_TOKEN
+        sync: false
+      - key: WEB_SESSION_SECRET
+        generateValue: true
+      - key: WEB_COOKIE_SECURE
+        value: "1"
+
+  - type: worker
+    name: tg-group-admin-bot
+    runtime: docker
+    plan: starter
+    region: singapore
+    dockerContext: .
+    dockerfilePath: ./Dockerfile
+    dockerCommand: python local_polling.py
+    autoDeploy: true
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: ADMIN_USER_ID
+        sync: false
+      - key: KV_REST_API_URL
+        sync: false
+      - key: KV_REST_API_TOKEN
+        sync: false
+      - key: WEB_APP_URL
+        sync: false

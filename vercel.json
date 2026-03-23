@@ -1,0 +1,34 @@
+{
+  "builds": [
+    {
+      "src": "api/tg_bot.py",
+      "use": "@vercel/python"
+    },
+    {
+      "src": "api/web.py",
+      "use": "@vercel/python"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/api/telegram",
+      "dest": "api/tg_bot.py"
+    },
+    {
+      "src": "/api/web/(.*)",
+      "dest": "api/web.py"
+    },
+    {
+      "src": "/web/(.*)",
+      "dest": "api/web.py"
+    },
+    {
+      "src": "/web",
+      "dest": "api/web.py"
+    },
+    {
+      "src": "/",
+      "dest": "api/web.py"
+    }
+  ]
+}
