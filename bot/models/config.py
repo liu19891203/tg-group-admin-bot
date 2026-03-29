@@ -130,6 +130,10 @@ DEFAULT_GROUP_CONFIG = {
     },
     "verified_user": {
         "enabled": False,
+        "members": [],
+        "reply_text": "{verifiedUser} 是本群认证会员，请认准官方账号。",
+        "reply_photo_file_id": "",
+        "reply_buttons": [],
     },
 }
 

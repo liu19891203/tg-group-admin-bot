@@ -106,7 +106,7 @@ async def _require_group_payload(session: dict, group_id: int, module_key: str |
         elif module_key:
             payload = load_module_payload(group_id, module_key)
         else:
-            payload = build_group_summary(group_id)
+            payload = build_group_summary(group_id, include_runtime=False)
         if module_key in {'verify', 'welcome', 'admin_access', 'nsfw', 'schedule', 'related', 'lang', 'points', 'activity', 'crypto', 'invite', 'autodelete', 'autoban', 'automute', 'autowarn', 'antispam', 'autoreply', 'ad', 'cmd', 'member', 'fun', 'usdt', 'lottery', 'verified'} and isinstance(payload, dict):
             payload['runtime'] = await build_module_runtime(bot, group_id, module_key)
         return {'ok': True, 'payload': payload}

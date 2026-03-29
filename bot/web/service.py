@@ -21,6 +21,7 @@ from ..services.extra_features import (
 )
 from ..services.membership import auto_reply_limit_for_group, group_service_owner_id, has_active_membership, schedule_limit_for_group
 from ..services.verify import get_verify_message
+from ..services.verified_user import build_verified_user_message_payload, normalize_verified_members
 from ..storage.config_store import (
     get_group_anti_spam,
     get_group_auto_ban,
@@ -91,11 +92,48 @@ class _PreviewUser:
         self.full_name = full_name or ""
 
     def mention_html(self) -> str:
-        return self.full_name or "Member"
+        return self.full_name or "成员"
 
 
 def _yn(value: bool) -> str:
-    return "enabled" if value else "disabled"
+    return "开启" if value else "关闭"
+
+
+def _verify_mode_label(mode: str) -> str:
+    return {
+        "join": "入群验证",
+        "calc": "算术验证",
+        "image_calc": "看图计算",
+        "captcha": "验证码验证",
+    }.get(str(mode or "join"), str(mode or "join"))
+
+
+def _anti_spam_action_label(action: str) -> str:
+    return {"mute": "禁言", "ban": "封禁"}.get(str(action or "mute"), str(action or "mute"))
+
+
+def _gomoku_status_label(status: str) -> str:
+    return {
+        "playing": "进行中",
+        "waiting": "等待加入",
+        "idle": "空闲",
+        "off": "关闭",
+    }.get(str(status or "idle"), str(status or "idle"))
+
+
+def _admin_access_mode_label(mode: str) -> str:
+    return {
+        "all_admins": "全部管理员",
+        "service_owner": "服务主账号",
+    }.get(str(mode or "all_admins"), str(mode or "all_admins"))
+
+
+def _usdt_tier_label(tier: str) -> str:
+    return {"best": "最优"}.get(str(tier or "best"), str(tier or "best"))
+
+
+def _nsfw_sensitivity_label(level: str) -> str:
+    return {"low": "低", "medium": "中", "high": "高"}.get(str(level or "medium"), str(level or "medium"))
 
 
 def _safe_int(value, default=0):
@@ -573,9 +611,16 @@ async def build_module_runtime(bot, group_id: int, key: str) -> dict:
         return runtime
     if key == "verified":
         verified_cfg = cfg.get("verified_user", {}) or {}
+        members = normalize_verified_members(verified_cfg.get("members") or [])
+        message = build_verified_user_message_payload(verified_cfg)
         runtime.update(
             {
                 "enabled": bool(verified_cfg.get("enabled")),
+                "member_count": len(members),
+                "members": members,
+                "reply_text_set": bool(message.get("text")),
+                "reply_photo_set": bool(message.get("photo_file_id")),
+                "reply_button_count": len(message.get("buttons") or []),
             }
         )
         return runtime
@@ -585,41 +630,41 @@ async def build_module_runtime(bot, group_id: int, key: str) -> dict:
 def _render_module_summary(group_id: int, key: str) -> str:
     cfg = get_group_config(group_id)
     if key == "verify":
-        return f"{_yn(bool(cfg.get('verify_enabled')))} / {cfg.get('verify_mode', 'join')}"
+        return f"{_yn(bool(cfg.get('verify_enabled')))} / {_verify_mode_label(cfg.get('verify_mode', 'join'))}"
     if key == "welcome":
-        return f"{_yn(bool(cfg.get('welcome_enabled')))} / TTL {cfg.get('welcome_ttl_sec', 0)}s"
+        return f"{_yn(bool(cfg.get('welcome_enabled')))} / 保留 {cfg.get('welcome_ttl_sec', 0)}秒"
     if key == "autoreply":
-        return f"{len(get_group_auto_replies(group_id))} rules"
+        return f"{len(get_group_auto_replies(group_id))} 条规则"
     if key == "autodelete":
-        return f"{len(get_group_auto_delete(group_id).get('custom_rules') or [])} rules"
+        return f"{len(get_group_auto_delete(group_id).get('custom_rules') or [])} 条规则"
     if key == "autoban":
-        return f"{len(get_group_auto_ban(group_id).get('rules') or [])} rules"
+        return f"{len(get_group_auto_ban(group_id).get('rules') or [])} 条规则"
     if key == "autowarn":
         warn_cfg = get_group_auto_warn(group_id)
-        return f"{len(warn_cfg.get('rules') or [])} rules / {warn_cfg.get('warn_limit', 3)}"
+        return f"{len(warn_cfg.get('rules') or [])} 条规则 / {warn_cfg.get('warn_limit', 3)}次"
     if key == "automute":
         mute_cfg = get_group_auto_mute(group_id)
-        return f"{len(mute_cfg.get('rules') or [])} rules / {mute_cfg.get('default_duration_sec', 60)}s"
+        return f"{len(mute_cfg.get('rules') or [])} 条规则 / {mute_cfg.get('default_duration_sec', 60)}秒"
     if key == "antispam":
         spam_cfg = get_group_anti_spam(group_id)
-        return f"{_yn(bool(spam_cfg.get('enabled')))} / {spam_cfg.get('threshold', 3)}"
+        return f"{_yn(bool(spam_cfg.get('enabled')))} / 阈值 {spam_cfg.get('threshold', 3)}"
     if key == "ad":
         ad = cfg.get('ad_filter', {}) or {}
         on_count = sum(1 for value in ad.values() if value is True)
-        return f"{on_count} toggles"
+        return f"{on_count} 项开关"
     if key == "cmd":
         cmd = cfg.get('command_gate', {}) or {}
         on_count = sum(1 for value in cmd.values() if value)
-        return f"{on_count} blocked"
+        return f"{on_count} 条已禁用"
     if key == "crypto":
         crypto = cfg.get('crypto', {}) or {}
         return f"{crypto.get('default_symbol', 'BTC')} / {_yn(bool(crypto.get('push_enabled')))}"
     if key == "member":
         member = cfg.get('member_watch', {}) or {}
         on_count = sum(1 for value in member.values() if value)
-        return f"{on_count} toggles"
+        return f"{on_count} 项开关"
     if key == "schedule":
-        return f"{len(load_schedule_items(group_id))} items"
+        return f"{len(load_schedule_items(group_id))} 条任务"
     if key == "points":
         points = cfg.get('points', {}) or {}
         return f"{_yn(bool(points.get('enabled')))} / {points.get('sign_command', '')}"
@@ -628,31 +673,32 @@ def _render_module_summary(group_id: int, key: str) -> str:
         return activity.get('today_command', 'activity')
     if key == "fun":
         fun = cfg.get('entertainment', {}) or {}
-        return f"dice {_yn(bool(fun.get('dice_enabled')))} / gomoku {_yn(bool(fun.get('gomoku_enabled')))}"
+        return f"骰子 {_yn(bool(fun.get('dice_enabled')))} / 五子棋 {_yn(bool(fun.get('gomoku_enabled')))}"
     if key == "usdt":
         usdt = cfg.get('usdt_price', {}) or {}
-        return f"{_yn(bool(usdt.get('enabled')))} / {usdt.get('tier', 'best')}"
+        return f"{_yn(bool(usdt.get('enabled')))} / {_usdt_tier_label(usdt.get('tier', 'best'))}"
     if key == "related":
         related = cfg.get('related_channel', {}) or {}
         on_count = sum(1 for value in related.values() if value is True)
-        return f"{on_count} toggles"
+        return f"{on_count} 项开关"
     if key == "admin_access":
-        return str((cfg.get('admin_access', {}) or {}).get('mode', 'all_admins'))
+        return _admin_access_mode_label((cfg.get('admin_access', {}) or {}).get('mode', 'all_admins'))
     if key == "nsfw":
         nsfw = cfg.get('nsfw', {}) or {}
-        return f"{_yn(bool(nsfw.get('enabled')))} / {nsfw.get('sensitivity', 'medium')}"
+        return f"{_yn(bool(nsfw.get('enabled')))} / {_nsfw_sensitivity_label(nsfw.get('sensitivity', 'medium'))}"
     if key == "lang":
         lang = cfg.get('language_whitelist', {}) or {}
-        return f"{_yn(bool(lang.get('enabled')))} / {len(lang.get('allowed') or [])}"
+        return f"{_yn(bool(lang.get('enabled')))} / {len(lang.get('allowed') or [])} 种语言"
     if key == "invite":
         invite = cfg.get('invite_links', {}) or {}
-        return f"{_yn(bool(invite.get('enabled')))} / {invite.get('reward_points', 0)}"
+        return f"{_yn(bool(invite.get('enabled')))} / {invite.get('reward_points', 0)} 积分"
     if key == "lottery":
         lottery = cfg.get('lottery', {}) or {}
         return f"{_yn(bool(lottery.get('enabled')))} / {lottery.get('query_command', '')}"
     if key == "verified":
         verified = cfg.get("verified_user", {}) or {}
-        return _yn(bool(verified.get("enabled")))
+        members = normalize_verified_members(verified.get("members") or [])
+        return f"{_yn(bool(verified.get('enabled')))} / {len(members)} 个账号"
     return "-"
 
 
@@ -660,102 +706,111 @@ def _module_runtime_preview(group_id: int, key: str, cfg: dict | None = None) ->
     cfg = cfg or get_group_config(group_id)
     if key == "verify":
         return [
-            f"{len(get_verify_session_users(group_id) or [])} pending",
-            "private delivery" if cfg.get("verify_private") else "group delivery",
+            f"{len(get_verify_session_users(group_id) or [])} 人待验证",
+            "私聊发送" if cfg.get("verify_private") else "群内发送",
         ]
     if key == "welcome":
         queue = list(get_welcome_queue(group_id) or [])
         ttl_queued = sum(1 for item in queue if _safe_int(item.get("delete_at"), 0) > 0)
-        return [f"{len(queue)} queued", f"{ttl_queued} ttl cleanup"]
+        return [f"{len(queue)} 条待发送", f"{ttl_queued} 条待清理"]
     if key == "autoreply":
         rules = list(get_group_auto_replies(group_id) or [])
         enabled_rules = [rule for rule in rules if rule.get("enabled", True)]
-        return [f"{len(enabled_rules)}/{len(rules)} enabled", f"limit {auto_reply_limit_for_group(group_id)}"]
+        return [f"{len(enabled_rules)}/{len(rules)} 已启用", f"上限 {auto_reply_limit_for_group(group_id)}"]
     if key == "autodelete":
         delete_cfg = get_group_auto_delete(group_id)
         active_filter_count = sum(1 for name, value in delete_cfg.items() if name.startswith("delete_") and value is True)
-        return [f"{active_filter_count} filters on", f"{len(list(delete_cfg.get('custom_rules') or []))} custom rules"]
+        return [f"{active_filter_count} 项过滤开启", f"{len(list(delete_cfg.get('custom_rules') or []))} 条自定义规则"]
     if key == "autoban":
         ban_cfg = get_group_auto_ban(group_id)
-        return [f"{len(list(ban_cfg.get('rules') or []))} ban rules", f"default {_safe_int(ban_cfg.get('default_duration_sec'), 86400)}s"]
+        return [f"{len(list(ban_cfg.get('rules') or []))} 条封禁规则", f"默认 {_safe_int(ban_cfg.get('default_duration_sec'), 86400)} 秒"]
     if key == "automute":
         mute_cfg = get_group_auto_mute(group_id)
-        return [f"{len(list(mute_cfg.get('rules') or []))} mute rules", f"default {_safe_int(mute_cfg.get('default_duration_sec'), 60)}s"]
+        return [f"{len(list(mute_cfg.get('rules') or []))} 条禁言规则", f"默认 {_safe_int(mute_cfg.get('default_duration_sec'), 60)} 秒"]
     if key == "autowarn":
         warn_cfg = get_group_auto_warn(group_id)
-        return [f"limit {_safe_int(warn_cfg.get('warn_limit'), 3)}", f"{len(list(warn_cfg.get('rules') or []))} warn rules"]
+        return [f"上限 {_safe_int(warn_cfg.get('warn_limit'), 3)}", f"{len(list(warn_cfg.get('rules') or []))} 条警告规则"]
     if key == "antispam":
         spam_cfg = get_group_anti_spam(group_id)
         types = [item for item in (spam_cfg.get("types") or []) if str(item).strip()]
         if not spam_cfg.get("enabled"):
-            return ["disabled", f"{len(types)} content types"]
-        return [f"{str(spam_cfg.get('action') or 'mute')} at {_safe_int(spam_cfg.get('threshold'), 3)}", f"{len(types)} content types"]
+            return ["已关闭", f"{len(types)} 类内容"]
+        return [f"{_anti_spam_action_label(str(spam_cfg.get('action') or 'mute'))} / 阈值 {_safe_int(spam_cfg.get('threshold'), 3)}", f"{len(types)} 类内容"]
     if key == "ad":
         ad_cfg = cfg.get("ad_filter", {}) or {}
         enabled_filters = [name for name, value in ad_cfg.items() if value is True]
-        return [f"{len(enabled_filters)} filters on"]
+        return [f"{len(enabled_filters)} 项过滤开启"]
     if key == "cmd":
         gate_cfg = cfg.get("command_gate", {}) or {}
         blocked = [name for name, value in gate_cfg.items() if value]
-        preview = ", ".join(blocked[:3]) if blocked else "none"
-        return [f"{len(blocked)} blocked", preview]
+        preview = ", ".join(blocked[:3]) if blocked else "无"
+        return [f"{len(blocked)} 条已禁用", preview]
     if key == "crypto":
         crypto_cfg = cfg.get("crypto", {}) or {}
-        return [f"symbol {str(crypto_cfg.get('default_symbol') or 'BTC')}", f"push {'on' if crypto_cfg.get('push_enabled') else 'off'}"]
+        return [f"默认币种 {str(crypto_cfg.get('default_symbol') or 'BTC')}", f"推送 {_yn(bool(crypto_cfg.get('push_enabled')))}"]
     if key == "member":
         member_cfg = cfg.get("member_watch", {}) or {}
         enabled_watchers = [name for name, value in member_cfg.items() if value is True]
-        return [f"{len(enabled_watchers)} watchers on"]
+        return [f"{len(enabled_watchers)} 项监听开启"]
     if key == "schedule":
         items = list(load_schedule_items(group_id) or [])
         enabled_items = [item for item in items if item.get("enabled", True)]
-        return [f"{len(enabled_items)}/{len(items)} active", f"limit {schedule_limit_for_group(group_id)}"]
+        return [f"{len(enabled_items)}/{len(items)} 启用中", f"上限 {schedule_limit_for_group(group_id)}"]
     if key == "points":
         points_cfg = cfg.get("points", {}) or {}
         tracked = len(list(kv_get_json(_points_users_key(group_id), []) or []))
-        return [f"{tracked} tracked", f"chat points {'on' if points_cfg.get('chat_points_enabled') else 'off'}"]
+        return [f"{tracked} 人已记录", f"聊天积分 {_yn(bool(points_cfg.get('chat_points_enabled')))}"]
     if key == "activity":
         activity_cfg = cfg.get("activity", {}) or {}
         tracked = len(list(kv_get_json(_activity_users_key(group_id), []) or []))
-        return [f"{tracked} tracked", str(activity_cfg.get("today_command") or "activity")]
+        return [f"{tracked} 人已记录", str(activity_cfg.get("today_command") or "activity")]
     if key == "fun":
         fun_cfg = cfg.get("entertainment", {}) or {}
         active_game = get_active_gomoku_game(group_id)
-        gomoku_status = str((active_game or {}).get("status") or ("idle" if fun_cfg.get("gomoku_enabled") else "off"))
-        return [f"dice {'on' if fun_cfg.get('dice_enabled', True) else 'off'}", f"gomoku {gomoku_status}"]
+        gomoku_status = _gomoku_status_label(str((active_game or {}).get("status") or ("idle" if fun_cfg.get("gomoku_enabled") else "off")))
+        return [f"骰子 {_yn(bool(fun_cfg.get('dice_enabled', True)))}", f"五子棋 {gomoku_status}"]
     if key == "usdt":
         usdt_cfg = cfg.get("usdt_price", {}) or {}
         exchanges = [str(item).strip() for item in (usdt_cfg.get("exchanges") or []) if str(item).strip()]
-        return [f"tier {str(usdt_cfg.get('tier') or 'best')}", f"{len(exchanges)} exchanges"]
+        return [f"档位 {_usdt_tier_label(str(usdt_cfg.get('tier') or 'best'))}", f"{len(exchanges)} 个交易所"]
     if key == "related":
         related_cfg = cfg.get("related_channel", {}) or {}
-        return [f"occupy {'on' if related_cfg.get('occupy_comment') else 'off'}", f"{len(list(related_cfg.get('occupy_comment_buttons') or []))} buttons"]
+        return [f"占位评论 {_yn(bool(related_cfg.get('occupy_comment')))}", f"{len(list(related_cfg.get('occupy_comment_buttons') or []))} 个按钮"]
     if key == "admin_access":
         access_cfg = cfg.get("admin_access", {}) or {}
-        mode = str(access_cfg.get("mode") or "all_admins")
+        mode = _admin_access_mode_label(str(access_cfg.get("mode") or "all_admins"))
         owner_id = int(group_service_owner_id(group_id) or 0)
-        owner_state = "owner bound" if owner_id and has_active_membership(owner_id) else "owner unbound"
-        return [f"mode {mode}", owner_state if mode == "service_owner" else "all admins"]
+        owner_state = "主账号已绑定" if owner_id and has_active_membership(owner_id) else "主账号未绑定"
+        return [f"模式 {mode}", owner_state if str(access_cfg.get("mode") or "all_admins") == "service_owner" else "全部管理员"]
     if key == "nsfw":
         nsfw_cfg = cfg.get("nsfw", {}) or {}
-        return [f"threshold {_nsfw_threshold(nsfw_cfg)}", f"notice {'on' if nsfw_cfg.get('notice_enabled', True) else 'off'}"]
+        return [f"阈值 {_nsfw_threshold(nsfw_cfg)}", f"提醒 {_yn(bool(nsfw_cfg.get('notice_enabled', True)))}"]
     if key == "lang":
         lang_cfg = cfg.get("language_whitelist", {}) or {}
         allowed = [str(item).strip() for item in (lang_cfg.get("allowed") or []) if str(item).strip()]
-        return [f"{len(allowed)} allowed", f"whitelist {'on' if lang_cfg.get('enabled') else 'off'}"]
+        return [f"{len(allowed)} 种语言", f"白名单 {_yn(bool(lang_cfg.get('enabled')))}"]
     if key == "invite":
         invite_cfg = cfg.get("invite_links", {}) or {}
         tracked = len(list(kv_get_json(_invite_users_key(group_id), []) or []))
-        return [f"{tracked} inviters", f"reward {_safe_int(invite_cfg.get('reward_points'), 0)}"]
+        return [f"{tracked} 人邀请记录", f"奖励 {_safe_int(invite_cfg.get('reward_points'), 0)} 积分"]
     if key == "lottery":
         lottery_cfg = cfg.get("lottery", {}) or {}
         active_lottery = get_active_lottery(group_id)
         if active_lottery:
-            return ["active lottery", f"{len(list(active_lottery.get('participants') or []))} participants"]
-        return ["no active lottery", str(lottery_cfg.get("query_command") or "")]
+            return ["抽奖进行中", f"{len(list(active_lottery.get('participants') or []))} 人参与"]
+        return ["暂无进行中的抽奖", str(lottery_cfg.get("query_command") or "")]
     if key == "verified":
         verified_cfg = cfg.get("verified_user", {}) or {}
-        return ["enabled" if verified_cfg.get("enabled") else "disabled"]
+        members = normalize_verified_members(verified_cfg.get("members") or [])
+        message = build_verified_user_message_payload(verified_cfg)
+        if not bool(verified_cfg.get("enabled")):
+            return ["已关闭"]
+        preview = ["已启用"]
+        if members:
+            preview.append(f"{len(members)} 个已配置账号")
+        elif len(message.get("buttons") or []):
+            preview.append(f"{len(message.get('buttons') or [])} 个按钮")
+        return preview
     return []
 
 
@@ -765,9 +820,9 @@ def _module_runtime_alert_details(group_id: int, key: str, cfg: dict | None = No
     if key == "verify" and bool(cfg.get("verify_enabled", True)):
         targets = list(get_group_targets(group_id) or [])
         if not targets:
-            alerts.append({"severity": "error", "message": "No verify targets configured"})
+            alerts.append({"severity": "error", "message": "未配置验证目标"})
         elif not any(item.get("checkable", True) and item.get("chat_id") for item in targets):
-            alerts.append({"severity": "error", "message": "Verify targets are not checkable"})
+            alerts.append({"severity": "error", "message": "验证目标不可校验"})
         return alerts
     if key == "admin_access":
         access_cfg = cfg.get("admin_access", {}) or {}
@@ -775,20 +830,31 @@ def _module_runtime_alert_details(group_id: int, key: str, cfg: dict | None = No
             return alerts
         owner_id = int(group_service_owner_id(group_id) or 0)
         if owner_id <= 0:
-            alerts.append({"severity": "warning", "message": "Service owner is not bound"})
+            alerts.append({"severity": "warning", "message": "未绑定服务主账号"})
         elif not has_active_membership(owner_id):
-            alerts.append({"severity": "warning", "message": "Service owner membership expired"})
+            alerts.append({"severity": "warning", "message": "服务主账号会员已过期"})
         return alerts
     if key == "schedule":
         items = list(load_schedule_items(group_id) or [])
         enabled_items = [item for item in items if item.get("enabled", True)]
         limit = max(0, schedule_limit_for_group(group_id))
         if limit and len(items) >= limit:
-            alerts.append({"severity": "warning", "message": "Schedule limit reached"})
+            alerts.append({"severity": "warning", "message": "计划任务数量已达上限"})
         elif limit and len(items) >= max(1, limit - 1):
-            alerts.append({"severity": "info", "message": "Schedule almost full"})
+            alerts.append({"severity": "info", "message": "计划任务数量接近上限"})
         if items and not enabled_items:
-            alerts.append({"severity": "info", "message": "All schedule items are disabled"})
+            alerts.append({"severity": "info", "message": "计划任务均已关闭"})
+        return alerts
+    if key == "verified":
+        verified_cfg = cfg.get("verified_user", {}) or {}
+        if not bool(verified_cfg.get("enabled")):
+            return alerts
+        members = normalize_verified_members(verified_cfg.get("members") or [])
+        message = build_verified_user_message_payload(verified_cfg)
+        if not members:
+            alerts.append({"severity": "warning", "message": "未配置认证账号"})
+        if not message.get("text") and not message.get("photo_file_id") and not message.get("buttons"):
+            alerts.append({"severity": "warning", "message": "认证回复消息为空"})
         return alerts
     return alerts
 
@@ -797,17 +863,72 @@ def _module_runtime_alerts(group_id: int, key: str, cfg: dict | None = None) -> 
     return [str(item.get("message") or "").strip() for item in _module_runtime_alert_details(group_id, key, cfg) if str(item.get("message") or "").strip()]
 
 
-def build_group_summary(group_id: int) -> dict:
+def _lightweight_module_summary(cfg: dict, item: dict) -> str:
+    key = str(item.get("key") or "")
+    if key == "verify":
+        return f"{_yn(bool(cfg.get('verify_enabled')))} / {_verify_mode_label(cfg.get('verify_mode', 'join'))}"
+    if key == "welcome":
+        return f"{_yn(bool(cfg.get('welcome_enabled')))} / 保留 {cfg.get('welcome_ttl_sec', 0)}秒"
+    if key == "crypto":
+        crypto = cfg.get("crypto", {}) or {}
+        return f"{crypto.get('default_symbol', 'BTC')} / {_yn(bool(crypto.get('push_enabled')))}"
+    if key == "ad":
+        ad = cfg.get("ad_filter", {}) or {}
+        return f"{sum(1 for value in ad.values() if value is True)} 项开关"
+    if key == "cmd":
+        gate = cfg.get("command_gate", {}) or {}
+        return f"{sum(1 for value in gate.values() if value)} 条已禁用"
+    if key == "member":
+        member = cfg.get("member_watch", {}) or {}
+        return f"{sum(1 for value in member.values() if value)} 项开关"
+    if key == "points":
+        points = cfg.get("points", {}) or {}
+        return f"{_yn(bool(points.get('enabled')))} / {points.get('sign_command', '')}"
+    if key == "activity":
+        activity = cfg.get("activity", {}) or {}
+        return str(activity.get("today_command") or "activity")
+    if key == "fun":
+        fun = cfg.get("entertainment", {}) or {}
+        return f"骰子 {_yn(bool(fun.get('dice_enabled', True)))} / 五子棋 {_yn(bool(fun.get('gomoku_enabled')))}"
+    if key == "usdt":
+        usdt = cfg.get("usdt_price", {}) or {}
+        return f"{_yn(bool(usdt.get('enabled')))} / {_usdt_tier_label(usdt.get('tier', 'best'))}"
+    if key == "related":
+        related = cfg.get("related_channel", {}) or {}
+        return f"{sum(1 for value in related.values() if value is True)} 项开关"
+    if key == "admin_access":
+        return _admin_access_mode_label((cfg.get("admin_access", {}) or {}).get("mode", "all_admins"))
+    if key == "nsfw":
+        nsfw = cfg.get("nsfw", {}) or {}
+        return f"{_yn(bool(nsfw.get('enabled')))} / {_nsfw_sensitivity_label(nsfw.get('sensitivity', 'medium'))}"
+    if key == "lang":
+        lang = cfg.get("language_whitelist", {}) or {}
+        return f"{_yn(bool(lang.get('enabled')))} / {len(lang.get('allowed') or [])} 种语言"
+    if key == "invite":
+        invite = cfg.get("invite_links", {}) or {}
+        return f"{_yn(bool(invite.get('enabled')))} / {invite.get('reward_points', 0)} 积分"
+    if key == "lottery":
+        lottery = cfg.get("lottery", {}) or {}
+        return f"{_yn(bool(lottery.get('enabled')))} / {lottery.get('query_command', '')}"
+    if key == "verified":
+        verified = cfg.get("verified_user", {}) or {}
+        return _yn(bool(verified.get("enabled")))
+    return "-"
+
+
+def build_group_summary(group_id: int, *, include_runtime: bool = True) -> dict:
     cfg = get_group_config(group_id)
     modules = []
     for item in list_modules():
+        runtime_preview = _module_runtime_preview(group_id, item["key"], cfg) if include_runtime else []
+        runtime_alert_details = _module_runtime_alert_details(group_id, item["key"], cfg) if include_runtime else []
         modules.append(
             {
                 **item,
-                "summary": _render_module_summary(group_id, item["key"]),
-                "runtime_preview": _module_runtime_preview(group_id, item["key"], cfg),
-                "runtime_alerts": _module_runtime_alerts(group_id, item["key"], cfg),
-                "runtime_alert_details": _module_runtime_alert_details(group_id, item["key"], cfg),
+                "summary": _render_module_summary(group_id, item["key"]) if include_runtime else _lightweight_module_summary(cfg, item),
+                "runtime_preview": runtime_preview,
+                "runtime_alerts": [str(entry.get("message") or "").strip() for entry in runtime_alert_details if str(entry.get("message") or "").strip()],
+                "runtime_alert_details": runtime_alert_details,
             }
         )
     return {
@@ -1139,8 +1260,15 @@ def load_module_payload(group_id: int, key: str) -> dict:
         return {"module": meta, "supported": True, "editor": "usdt", "data": data}
     if key == "verified":
         verified_cfg = _normalize_typed_value(DEFAULT_GROUP_CONFIG["verified_user"], cfg.get("verified_user", {}) or {})
+        message = build_verified_user_message_payload(verified_cfg)
         data = {
             "enabled": bool(verified_cfg.get("enabled", False)),
+            "members": normalize_verified_members(verified_cfg.get("members") or []),
+            "message": {
+                "text": str(message.get("text") or ""),
+                "photo_file_id": str(message.get("photo_file_id") or ""),
+                "buttons": _normalize_buttons(message.get("buttons") or []),
+            },
         }
         return {"module": meta, "supported": True, "editor": "verified", "data": data}
     return {"module": meta, "supported": False, "editor": "json", "data": _raw_module_data(group_id, key)}
@@ -1510,8 +1638,16 @@ def save_module_payload(group_id: int, key: str, payload: dict):
         return load_module_payload(group_id, key)
     if key == "verified":
         data = _require_object(payload.get("data"), "verified.data")
+        message = _require_object(data.get("message") or {}, "verified.data.message")
+        members_value = data.get("members")
+        if members_value is not None and not isinstance(members_value, list):
+            raise ValueError("verified.data.members must be a JSON array")
         verified_cfg = _normalize_typed_value(DEFAULT_GROUP_CONFIG["verified_user"], cfg.get("verified_user", {}) or {})
         verified_cfg["enabled"] = bool(data.get("enabled"))
+        verified_cfg["members"] = normalize_verified_members(members_value or [])
+        verified_cfg["reply_text"] = str(message.get("text") or "")
+        verified_cfg["reply_photo_file_id"] = str(message.get("photo_file_id") or "")
+        verified_cfg["reply_buttons"] = _normalize_buttons(message.get("buttons") or [])
         cfg["verified_user"] = verified_cfg
         save_group_config(group_id, cfg)
         return load_module_payload(group_id, key)

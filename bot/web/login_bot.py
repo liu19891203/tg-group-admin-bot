@@ -1,4 +1,4 @@
-﻿import html
+import html
 import re
 import time
 

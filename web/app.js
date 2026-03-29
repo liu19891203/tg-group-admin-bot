@@ -18,6 +18,7 @@ let previewRequestId = 0;
 let scheduleItemSeq = 0;
 let moderationRuleSeq = 0;
 let loginPollTimer = null;
+let summaryRequestId = 0;
 
 function isLoopbackHost() {
   return ['127.0.0.1', 'localhost', '::1'].includes(window.location.hostname);
@@ -41,6 +42,98 @@ function syncGroupLocation() {
 }
 
 state.requestedGroupId = readRequestedGroupId();
+const BUTTON_TYPE_LABELS = {
+  url: 'URL 链接',
+  callback: '回调指令',
+};
+
+const VERIFY_MODE_LABELS = {
+  join: '按钮验证',
+  calc: '算术题',
+  image_calc: '图片算术题',
+  captcha: '验证码',
+};
+
+const VERIFY_FAIL_ACTION_LABELS = {
+  none: '仅提示',
+  mute: '禁言',
+  kick: '移出',
+  ban: '封禁',
+};
+
+const MATCH_MODE_LABELS = {
+  contains: '包含',
+  exact: '完全匹配',
+  regex: '正则表达式',
+};
+
+const MODERATION_ACTION_LABELS = {
+  mute: '禁言',
+  kick: '移出',
+};
+
+const NSFW_SENSITIVITY_LABELS = {
+  low: '低',
+  medium: '中',
+  high: '高',
+};
+
+const RUNTIME_KEY_LABELS = {
+  enabled: '开关',
+  status: '状态',
+  mode: '模式',
+  action: '处理动作',
+  sensitivity: '灵敏度',
+  private_enabled: '私聊验证',
+  timeout_sec: '超时秒数',
+  max_attempts: '最大重试',
+  fail_action: '失败处理',
+  ttl_sec: '自动删除秒数',
+  threshold: '触发阈值',
+  window_sec: '时间窗口',
+  mute_seconds: '禁言秒数',
+  delete_prev: '删除上一条',
+  next_at: '下次执行时间戳',
+  default_symbol: '默认币种',
+  member_count: '认证账号数量',
+  members: '认证账号',
+  reply_text_set: '文本已设置',
+  reply_photo_set: '图片已设置',
+  reply_button_count: '按钮数量',
+};
+
+const RUNTIME_VALUE_LABELS = {
+  mode: VERIFY_MODE_LABELS,
+  fail_action: VERIFY_FAIL_ACTION_LABELS,
+  action: {
+    ...MODERATION_ACTION_LABELS,
+    ban: '封禁',
+  },
+  sensitivity: NSFW_SENSITIVITY_LABELS,
+  status: {
+    idle: '空闲',
+    ready: '就绪',
+    running: '运行中',
+    active: '已启用',
+    disabled: '已停用',
+    error: '异常',
+  },
+};
+
+function optionLabel(labels, value) {
+  if (value == null || value === '') return '';
+  if (labels && Object.prototype.hasOwnProperty.call(labels, value)) {
+    return labels[value];
+  }
+  return String(value).replaceAll('_', ' ');
+}
+
+function renderOptionList(values, selectedValue, labels = {}) {
+  return (values || []).map((value) => `
+    <option value="${escapeHtml(value)}" ${value === selectedValue ? 'selected' : ''}>${escapeHtml(optionLabel(labels, value))}</option>
+  `).join('');
+}
+
 function cloneData(value) {
   return value == null ? value : JSON.parse(JSON.stringify(value));
 }
@@ -106,8 +199,28 @@ function moduleMeta(key) {
   return (state.bootstrap?.modules || []).find((item) => item.key === key) || null;
 }
 
+function emptySummaryItem(item = {}) {
+  return {
+    key: item.key || '',
+    label: item.label || item.key || '',
+    icon: item.icon || '',
+    editor: item.editor || '',
+    summary: '',
+    runtime_preview: [],
+    runtime_alerts: [],
+    runtime_alert_details: [],
+  };
+}
+
+function moduleEntries() {
+  const summaryModules = state.summary?.modules;
+  if (Array.isArray(summaryModules) && summaryModules.length) return summaryModules;
+  const fallbackModules = state.me?.modules || state.bootstrap?.modules || [];
+  return fallbackModules.map((item) => emptySummaryItem(item));
+}
+
 function summaryModule(key) {
-  return (state.summary?.modules || []).find((item) => item.key === key) || {};
+  return moduleEntries().find((item) => item.key === key) || emptySummaryItem(moduleMeta(key) || { key });
 }
 
 function stopLoginPolling() {
@@ -177,10 +290,37 @@ async function loadSession() {
   }
 }
 
+async function refreshGroupSummary({ renderWhenDone = true, showError = false } = {}) {
+  const groupId = Number(state.currentGroupId);
+  if (!groupId) {
+    state.summary = null;
+    if (renderWhenDone) render();
+    return null;
+  }
+  const requestId = ++summaryRequestId;
+  try {
+    const summary = await api(`/api/web/groups/${groupId}/summary`);
+    if (requestId !== summaryRequestId || Number(state.currentGroupId) !== groupId) return null;
+    state.summary = summary;
+    if (renderWhenDone) render();
+    return summary;
+  } catch (error) {
+    if (requestId !== summaryRequestId || Number(state.currentGroupId) !== groupId) return null;
+    if (showError) {
+      showNotice(humanizeErrorMessage(error.message, '加载群组概览失败'), 'error');
+    }
+    return null;
+  }
+}
+
 async function loadGroup(groupId, moduleKey = state.currentModuleKey) {
   state.currentGroupId = Number(groupId);
   syncGroupLocation();
-  state.summary = await api(`/api/web/groups/${state.currentGroupId}/summary`);
+  state.summary = null;
+  state.modulePayload = null;
+  state.previewHtml = '';
+  render();
+  void refreshGroupSummary({ renderWhenDone: true, showError: false });
   await loadModule(moduleKey || state.currentModuleKey || 'verify');
 }
 
@@ -394,6 +534,10 @@ function groups() {
   return state.me?.groups || [];
 }
 
+function currentGroupTitle() {
+  return groups().find((group) => Number(group.id) === Number(state.currentGroupId))?.title || state.summary?.group_title || '群组';
+}
+
 function runtimePreviewLines(item) {
   return (Array.isArray(item?.runtime_preview) ? item.runtime_preview : []).filter((value) => value != null && String(value).trim() !== '').slice(0, 2);
 }
@@ -407,7 +551,7 @@ function runtimeAlertDetails(item) {
 }
 
 function renderSidebarModules() {
-  return (state.summary?.modules || []).map((item) => {
+  return moduleEntries().map((item) => {
     const runtimeLines = runtimePreviewLines(item);
     const alertLines = runtimeAlertLines(item);
     return `
@@ -426,13 +570,23 @@ function renderSidebarModules() {
 
 function renderGroupOverviewCard() {
   const keys = ['verify', 'schedule', 'admin_access', 'nsfw', 'invite', 'fun'];
+  if (!(Array.isArray(state.summary?.modules) && state.summary.modules.length)) {
+    return `
+      <section class="section-card group-overview-card">
+        <div>
+          <p class="eyebrow">群组概览</p>
+          <h3 class="section-title">${escapeHtml(currentGroupTitle())}</h3>
+        </div>
+        <div class="subtle">概览加载中...</div>
+      </section>`;
+  }
   const items = keys.map((key) => summaryModule(key)).filter((item) => item && item.key);
   if (!items.length) return '';
   return `
     <section class="section-card group-overview-card">
       <div>
         <p class="eyebrow">群组概览</p>
-        <h3 class="section-title">${escapeHtml(state.summary?.group_title || '群组')}</h3>
+        <h3 class="section-title">${escapeHtml(currentGroupTitle())}</h3>
       </div>
       <div class="overview-list">
         ${items.map((item) => {
@@ -518,7 +672,7 @@ function editorHintText(editor) {
   if (editor === 'json') {
     return '当前模块仍使用高级 JSON 编辑器。';
   }
-  if (['welcome', 'verify', 'autoreply', 'invite'].includes(editor)) {
+  if (['welcome', 'verify', 'autoreply', 'invite', 'verified'].includes(editor)) {
     return '支持按钮和消息预览的富文本编辑器。';
   }
   return '适用于常用配置项的结构化表单编辑器。';
@@ -942,14 +1096,24 @@ function renderUsdtEditor(data) {
 }
 
 function renderVerifiedEditor(data) {
+  const members = Array.isArray(data.members) ? data.members : [];
+  const message = data.message || { text: '', photo_file_id: '', buttons: [] };
   return `
     <section class="section-card">
       <div class="field-grid">
         <label class="toggle"><input type="checkbox" id="verified-enabled" ${data.enabled ? 'checked' : ''} />启用认证用户功能</label>
+        <div class="field full">
+          <label class="field-label">认证账号</label>
+          <textarea id="verified-members" placeholder="@alice\n123456789">${escapeHtml(members.join('\\n'))}</textarea>
+          <div class="subtle">支持 Telegram 用户名、t.me 链接或纯数字账号 ID，多个用换行或逗号分隔。</div>
+        </div>
       </div>
+    </section>
+    <section class="section-card">
+      ${messageEditorHtml('verified-message', message, '认证消息')}
+      <div class="subtle">支持使用 {verifiedUser}、{verified}、{matchedUser} 占位符。</div>
     </section>`;
 }
-
 function moderationRuleConfig(kind) {
   return {
     autoban: { title: '自动封禁规则', containerId: 'autoban-rule-list', action: 'remove-autoban-rule', emptyText: '暂无自动封禁规则', durationLabel: '规则时长（秒）', withDuration: true },
@@ -1397,7 +1561,7 @@ function collectPayload() {
     try {
       targets = JSON.parse(document.getElementById('verify-targets-json')?.value || '[]');
     } catch {
-      throw new Error('楠岃瘉鐩爣 JSON 鏍煎紡閿欒');
+      throw new Error('验证目标 JSON 格式错误');
     }
     const messages = {};
     ['join', 'calc', 'image_calc', 'captcha'].forEach((mode) => {
@@ -1631,6 +1795,8 @@ function collectPayload() {
     return {
       data: {
         enabled: document.getElementById('verified-enabled')?.checked || false,
+        members: (document.getElementById('verified-members')?.value || '').split(/[\n,]/).map((item) => item.trim()).filter(Boolean),
+        message: collectMessage('verified-message'),
       },
     };
   }
@@ -1735,6 +1901,15 @@ function previewMessageFromCurrentForm() {
       preview_context: { user: '新成员', userName: '新成员', group: state.summary?.group_title || '群组' },
     };
   }
+  if (key === 'verified') {
+    const members = (document.getElementById('verified-members')?.value || '').split(/[\n,]/).map((item) => item.trim()).filter(Boolean);
+    const firstMember = members[0] || 'verified_user';
+    const previewMember = /^\d+$/.test(firstMember) ? firstMember : `@${firstMember.replace(/^@/, '')}`;
+    return {
+      message: collectMessage('verified-message'),
+      preview_context: { user: '群成员', userName: '群成员', group: state.summary?.group_title || '群组', verified: previewMember, verifiedUser: previewMember, matchedUser: previewMember },
+    };
+  }
   if (key === 'related') {
     return {
       message: collectMessage('related-comment'),
@@ -1837,7 +2012,7 @@ async function saveCurrentModule() {
       method: 'POST',
       body: JSON.stringify(payload),
     });
-    state.summary = await api(`/api/web/groups/${state.currentGroupId}/summary`);
+      void refreshGroupSummary({ renderWhenDone: true, showError: false });
     state.previewHtml = '';
     state.notice = '\u4fdd\u5b58\u6210\u529f';
     state.noticeType = 'ok';
@@ -2128,3 +2303,4 @@ document.addEventListener('click', async (event) => {
 });
 
 boot();
+

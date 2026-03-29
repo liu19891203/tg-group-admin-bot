@@ -1,4 +1,4 @@
-﻿import re
+import re
 import logging
 
 from telegram.constants import ParseMode

@@ -1,4 +1,4 @@
-﻿import logging
+import logging
 
 from telegram.constants import ChatType
 
@@ -11,6 +11,7 @@ from ..services.auto_mute import handle_auto_mute
 from ..services.auto_warn import handle_auto_warn
 from ..services.anti_spam import handle_anti_spam
 from ..services.auto_reply import handle_auto_reply
+from ..services.verified_user import handle_verified_user_reply
 from ..services.extra_features import (
     handle_ad_filter,
     handle_group_commands,
@@ -107,6 +108,9 @@ async def on_group_message(update, context):
             return
 
     await record_message_metrics(message, user, chat)
+
+    if await handle_verified_user_reply(context, message, user, chat):
+        return
 
     if not is_admin_user:
         await handle_auto_reply(context, message, user, chat)

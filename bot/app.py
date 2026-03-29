@@ -1,4 +1,4 @@
-﻿import logging
+import logging
 import json
 
 from telegram.ext import (

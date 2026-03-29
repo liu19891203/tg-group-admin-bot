@@ -143,7 +143,7 @@ def _normalize_schedule_buttons(buttons) -> list[dict]:
             row = 0
         rows.append(
             {
-                "text": str(item.get("text") or "Button"),
+                "text": str(item.get("text") or "按钮"),
                 "type": str(item.get("type") or "url"),
                 "value": str(item.get("value") or ""),
                 "row": row,
@@ -232,25 +232,25 @@ def parse_schedule_message_input(raw_text: str, photo_file_id: str = "") -> dict
         try:
             data = json.loads(text_value)
         except json.JSONDecodeError as exc:
-            raise ValueError(f"JSON format error: {exc.msg}") from exc
+            raise ValueError(f"JSON 格式错误：{exc.msg}") from exc
         if not isinstance(data, dict):
-            raise ValueError("Schedule message JSON must be an object")
+            raise ValueError("定时消息 JSON 必须是对象")
     else:
         if "|" not in text_value:
-            raise ValueError("Expected 'message text | interval minutes' or a JSON object")
+            raise ValueError("请输入“消息内容 | 间隔分钟”，或提供 JSON 对象")
         raw_body, raw_minutes = [part.strip() for part in text_value.split("|", 1)]
         if not raw_body and not photo_file_id:
-            raise ValueError("Schedule message content cannot be empty")
+            raise ValueError("定时消息内容不能为空")
         try:
             minutes = int(raw_minutes)
         except ValueError as exc:
-            raise ValueError("Interval minutes must be an integer") from exc
+            raise ValueError("间隔分钟必须是整数") from exc
         data = {"text": raw_body, "interval_sec": max(60, minutes * 60)}
     if photo_file_id and not data.get("photo_file_id"):
         data["photo_file_id"] = photo_file_id
     item = _normalize_schedule_item(data, default_next_at=int(time.time()))
     if not item.get("text") and not item.get("photo_file_id") and not item.get("buttons"):
-        raise ValueError("Schedule message requires text, photo, or buttons")
+        raise ValueError("定时消息至少需要文本、图片或按钮")
     return item
 
 
@@ -382,10 +382,10 @@ def _iter_tron_assets(rows) -> list[tuple[str, Decimal]]:
 async def fetch_wallet_summary(address: str) -> str:
     chain = _classify_wallet_address(address)
     if chain == "tron":
-        return f"Chain: TRON\nAddress: {_short_addr(address, 8, 6)}"
+        return f"链路：TRON\n地址：{_short_addr(address, 8, 6)}"
     if chain == "evm":
-        return f"Chain: EVM\nAddress: {_short_addr(address, 8, 6)}"
-    return "Unsupported wallet address"
+        return f"链路：EVM\n地址：{_short_addr(address, 8, 6)}"
+    return "暂不支持的钱包地址"
 
 
 SPOT_QUOTE_ASSETS = ("USDT", "FDUSD", "USDC", "BTC", "ETH", "BNB", "TRY", "EUR", "USD")
@@ -421,21 +421,21 @@ def _format_percent(value) -> str:
 async def fetch_spot_summary(symbol: str) -> str:
     pair = _normalize_spot_symbol(symbol)
     if not pair:
-        return "Invalid symbol."
+        return "交易对无效。"
     try:
         data = await _fetch_json("GET", "https://api.binance.com/api/v3/ticker/24hr", params={"symbol": pair})
     except Exception as exc:
         logger.warning("spot_summary_failed symbol=%s: %s", pair, exc)
-        return f"Price query failed for {pair}."
+        return f"{pair} 价格查询失败。"
     if not data or "lastPrice" not in data:
-        return f"No spot data for {pair}."
+        return f"未找到 {pair} 的现货数据。"
     base, quote = _split_spot_symbol(pair)
     lines = [
         f"{base}/{quote}",
-        f"Last: {_format_amount(data.get('lastPrice'), 6)} {quote}",
-        f"24h: {_format_percent(data.get('priceChangePercent'))}",
-        f"High/Low: {_format_amount(data.get('highPrice'), 6)} / {_format_amount(data.get('lowPrice'), 6)} {quote}",
-        f"Volume: {_format_amount(data.get('volume'), 2)} {base}",
+        f"最新价：{_format_amount(data.get('lastPrice'), 6)} {quote}",
+        f"24h 涨跌：{_format_percent(data.get('priceChangePercent'))}",
+        f"24h 最高/最低：{_format_amount(data.get('highPrice'), 6)} / {_format_amount(data.get('lowPrice'), 6)} {quote}",
+        f"24h 成交量：{_format_amount(data.get('volume'), 2)} {base}",
     ]
     return "\n".join(lines)
 
@@ -599,8 +599,8 @@ async def fetch_usdt_price_summary(usdt_cfg: dict | None = None) -> str:
     snapshot = await fetch_usdt_price_snapshot(usdt_cfg)
     price = _to_decimal(snapshot.get("reference_price"))
     if price <= 0:
-        return "USDT price is currently unavailable."
-    lines = ["USDT CNY", f"Reference: {_format_amount(price, 4)} CNY/USDT"]
+        return "当前暂无可用的 USDT 价格。"
+    lines = ["USDT 人民币", f"参考价：{_format_amount(price, 4)} CNY/USDT"]
     for row in snapshot.get("rows") or []:
         label = str(row.get("exchange") or "").upper()
         lines.append(f"{label}: {_format_amount(row.get('best_price'), 4)}")
@@ -633,21 +633,21 @@ async def _handle_usdt_commands(message, cfg: dict) -> bool:
     snapshot = await fetch_usdt_price_snapshot(usdt_cfg)
     price = _to_decimal(snapshot.get("reference_price"))
     if price <= 0:
-        await message.reply_text("USDT price is currently unavailable.")
+        await message.reply_text("当前暂无可用的 USDT 价格。")
         return True
 
     if cny_amount is not None:
         approx_usdt = cny_amount / price
         await message.reply_text(
-            f"{_format_amount(cny_amount, 2)} CNY ~= {_format_amount(approx_usdt, 4)} USDT\n"
-            f"Ref: {_format_amount(price, 4)} CNY/USDT"
+            f"{_format_amount(cny_amount, 2)} CNY ≈ {_format_amount(approx_usdt, 4)} USDT\n"
+            f"参考价：{_format_amount(price, 4)} CNY/USDT"
         )
         return True
 
     approx_cny = usdt_amount * price
     await message.reply_text(
-        f"{_format_amount(usdt_amount, 4)} USDT ~= {_format_amount(approx_cny, 2)} CNY\n"
-        f"Ref: {_format_amount(price, 4)} CNY/USDT"
+        f"{_format_amount(usdt_amount, 4)} USDT ≈ {_format_amount(approx_cny, 2)} CNY\n"
+        f"参考价：{_format_amount(price, 4)} CNY/USDT"
     )
     return True
 
@@ -661,7 +661,7 @@ async def _apply_invite_success(context, chat, member, invite_cfg: dict, inviter
     if invite_cfg.get("notify_enabled"):
         payload = _normalize_message_payload(
             {
-                "text": invite_cfg.get("notify_text") or "{userName} joined via invite",
+                "text": invite_cfg.get("notify_text") or "{userName} 通过邀请链接加入群组",
                 "photo_file_id": invite_cfg.get("notify_photo_file_id") or "",
                 "buttons": invite_cfg.get("notify_buttons") or [],
             }
@@ -729,13 +729,13 @@ async def track_member_profile(context, chat, user):
         return
     changes = []
     if str(old.get("full_name") or "") != current["full_name"]:
-        changes.append(f"Nickname: {old.get('full_name') or '-'} -> {current['full_name'] or '-'}")
+        changes.append(f"昵称：{old.get('full_name') or '-'} -> {current['full_name'] or '-'}")
     old_username = str(old.get("username") or "")
     new_username = current["username"]
     if old_username != new_username:
         left = f"@{old_username}" if old_username else "-"
         right = f"@{new_username}" if new_username else "-"
-        changes.append(f"@username: {left} -> {right}")
+        changes.append(f"用户名：{left} -> {right}")
     if not changes:
         return
     rows = kv_get_json(_profile_changes_key(chat.id), []) or []
@@ -743,7 +743,7 @@ async def track_member_profile(context, chat, user):
     kv_set_json(_profile_changes_key(chat.id), rows[-50:])
     if cfg.get("nickname_change_notice"):
         mention = f'<a href="tg://user?id={user.id}">{(user.full_name or str(user.id)).replace("<", "&lt;").replace(">", "&gt;")}</a>'
-        text = "\n".join([f"馃摑 {mention} member profile changed", *changes])
+        text = "\n".join([f"成员资料更新：{mention}", *changes])
         try:
             await getattr(chat, "send_message", None)(text, parse_mode=ParseMode.HTML)
         except Exception:
@@ -777,7 +777,7 @@ async def handle_related_channel_message(context, message, chat) -> bool:
     if cfg.get("occupy_comment") and _is_related_channel_forward(message):
         payload = _normalize_message_payload(
             {
-                "text": cfg.get("occupy_comment_text") or "Occupy comment",
+                "text": cfg.get("occupy_comment_text") or "占位评论",
                 "photo_file_id": cfg.get("occupy_comment_photo_file_id") or "",
                 "buttons": cfg.get("occupy_comment_buttons") or [],
             }
@@ -951,7 +951,7 @@ async def _resolve_user_label(context, chat_id: int, user_id: int) -> str:
             return _user_link(user_id, label)
     except Exception:
         pass
-    return _user_link(user_id, f"User {user_id}")
+    return _user_link(user_id, f"用户 {user_id}")
 
 
 def _normalize_command_value(value: str) -> str:
@@ -1050,18 +1050,18 @@ async def _send_html_message(context, chat_id: int, text: str, delete_after_sec:
 def parse_lottery_input(raw_text: str) -> dict:
     text = str(raw_text or "").strip()
     if not text:
-        raise ValueError("Lottery content cannot be empty")
+        raise ValueError("抽奖内容不能为空")
     winner_count = 1
     title = text
     if "|" in text:
         raw_title, raw_count = [part.strip() for part in text.split("|", 1)]
         if not raw_title:
-            raise ValueError("Lottery title cannot be empty")
+            raise ValueError("奖品标题不能为空")
         title = raw_title
         try:
             winner_count = max(1, int(raw_count or 1))
         except ValueError as exc:
-            raise ValueError("Winner count must be an integer") from exc
+            raise ValueError("中奖人数必须是整数") from exc
     return {"title": title, "winner_count": winner_count}
 
 
@@ -1070,7 +1070,7 @@ def _normalize_lottery(lottery: dict | None) -> dict | None:
         return None
     return {
         "id": str(lottery.get("id") or ""),
-        "title": str(lottery.get("title") or "Lottery"),
+        "title": str(lottery.get("title") or "抽奖活动"),
         "winner_count": max(1, _counter_int(lottery.get("winner_count"), 1)),
         "creator_id": _counter_int(lottery.get("creator_id"), 0),
         "participants": _normalize_user_index(lottery.get("participants") or []),
@@ -1110,8 +1110,8 @@ def _lottery_markup(chat_id: int, lottery: dict):
     lottery_id = str(lottery.get("id") or "")
     return InlineKeyboardMarkup(
         [[
-            InlineKeyboardButton("🎟️ 参与抽奖", callback_data=f"lottery:join:{chat_id}:{lottery_id}"),
-            InlineKeyboardButton("🎁 立即开奖", callback_data=f"lottery:draw:{chat_id}:{lottery_id}"),
+            InlineKeyboardButton("参与抽奖", callback_data=f"lottery:join:{chat_id}:{lottery_id}"),
+            InlineKeyboardButton("立即开奖", callback_data=f"lottery:draw:{chat_id}:{lottery_id}"),
         ]]
     )
 
@@ -1119,15 +1119,15 @@ def _lottery_markup(chat_id: int, lottery: dict):
 def _lottery_text(lottery: dict, winner_labels: list[str] | None = None) -> str:
     normalized = _normalize_lottery(lottery) or {}
     lines = [
-        "Lottery",
-        f"Prize: {html.escape(str(normalized.get('title') or 'Lottery'))}",
-        f"Winners: {int(normalized.get('winner_count') or 1)}",
-        f"Participants: {len(normalized.get('participants') or [])}",
-        f"Status: {'Closed' if normalized.get('closed') else 'Open'}",
+        "抽奖活动",
+        f"奖品：{html.escape(str(normalized.get('title') or '抽奖活动'))}",
+        f"中奖人数：{int(normalized.get('winner_count') or 1)}",
+        f"参与人数：{len(normalized.get('participants') or [])}",
+        f"状态：{'已结束' if normalized.get('closed') else '进行中'}",
     ]
     labels = list(winner_labels or [])
     if normalized.get("closed") and labels:
-        lines.append("Winner list:")
+        lines.append("中奖名单：")
         for index, label in enumerate(labels, start=1):
             lines.append(f"{index}. {label}")
     return "\n".join(lines)
@@ -1136,7 +1136,7 @@ def _lottery_text(lottery: dict, winner_labels: list[str] | None = None) -> str:
 async def publish_lottery(context, chat_id: int, creator_id: int, raw_text: str) -> dict:
     active = get_active_lottery(chat_id)
     if active is not None:
-        raise ValueError("An active lottery already exists")
+        raise ValueError("当前已有进行中的抽奖活动")
     payload = parse_lottery_input(raw_text)
     lottery = {
         "id": str(int(time.time() * 1000)),
@@ -1177,7 +1177,7 @@ async def _handle_lottery_commands(context, message, chat, cfg: dict) -> bool:
     if not text or not _matches_command(text, lottery_cfg.get("query_command", "")):
         return False
     lottery = get_active_lottery(chat.id)
-    rendered = _lottery_text(lottery) if lottery else "No active lottery."
+    rendered = _lottery_text(lottery) if lottery else "当前暂无进行中的抽奖活动。"
     await _send_html_message(
         context,
         chat.id,
@@ -1284,26 +1284,26 @@ def _gomoku_text(
     size = int(normalized.get("size") or 8)
     header = "  " + " ".join(str(idx + 1) for idx in range(size))
     board_lines = [f"{row_idx + 1} " + " ".join(_gomoku_piece(cell) for cell in row) for row_idx, row in enumerate(board)]
-    black_label = creator_label or _user_link(creator_id, f"User {creator_id}")
-    white_label = challenger_label or (_user_link(challenger_id, f"User {challenger_id}") if challenger_id else "Waiting for player")
+    black_label = creator_label or _user_link(creator_id, f"用户 {creator_id}")
+    white_label = challenger_label or (_user_link(challenger_id, f"用户 {challenger_id}") if challenger_id else "等待玩家加入")
     lines = [
-        "Gomoku",
-        f"Black: {black_label}",
-        f"White: {white_label}",
+        "五子棋对局",
+        f"黑方：{black_label}",
+        f"白方：{white_label}",
     ]
     status = str(normalized.get("status") or "waiting")
     if status == "waiting":
-        lines.append("Status: waiting for another player")
+        lines.append("状态：等待另一位玩家加入")
     elif status == "playing":
-        current_turn = turn_label or _user_link(_gomoku_turn_user_id(normalized), f"User {_gomoku_turn_user_id(normalized)}")
-        lines.append(f"Turn: {current_turn}")
+        current_turn = turn_label or _user_link(_gomoku_turn_user_id(normalized), f"用户 {_gomoku_turn_user_id(normalized)}")
+        lines.append(f"当前回合：{current_turn}")
     elif status == "finished":
-        label = winner_label or _user_link(int(normalized.get("winner_id") or 0), f"User {int(normalized.get('winner_id') or 0)}")
-        lines.append(f"Winner: {label}")
+        label = winner_label or _user_link(int(normalized.get("winner_id") or 0), f"用户 {int(normalized.get('winner_id') or 0)}")
+        lines.append(f"获胜者：{label}")
     elif status == "draw":
-        lines.append("Result: draw")
+        lines.append("结果：平局")
     else:
-        lines.append("Status: stopped")
+        lines.append("状态：已结束")
     lines.append("<code>" + "\n".join([header, *board_lines]) + "</code>")
     return "\n".join(lines)
 
@@ -1317,8 +1317,8 @@ def _gomoku_markup(chat_id: int, game: dict):
     if status == "waiting":
         return InlineKeyboardMarkup([
             [
-                InlineKeyboardButton("🎮 加入对局", callback_data=f"gomoku:join:{chat_id}:{game_id}"),
-                InlineKeyboardButton("🛑 结束对局", callback_data=f"gomoku:stop:{chat_id}:{game_id}"),
+                InlineKeyboardButton("加入对局", callback_data=f"gomoku:join:{chat_id}:{game_id}"),
+                InlineKeyboardButton("结束对局", callback_data=f"gomoku:stop:{chat_id}:{game_id}"),
             ]
         ])
     if status != "playing":
@@ -1334,7 +1334,7 @@ def _gomoku_markup(chat_id: int, game: dict):
                 data = f"gomoku:noop:{chat_id}:{game_id}:{x}:{y}"
             row_buttons.append(InlineKeyboardButton(_gomoku_piece(cell), callback_data=data))
         rows.append(row_buttons)
-    rows.append([InlineKeyboardButton("🛑 结束对局", callback_data=f"gomoku:stop:{chat_id}:{game_id}")])
+    rows.append([InlineKeyboardButton("结束对局", callback_data=f"gomoku:stop:{chat_id}:{game_id}")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -1360,14 +1360,14 @@ def _gomoku_board_full(board: list[list[int]]) -> bool:
 
 async def _gomoku_label(context, chat_id: int, user_id: int) -> str:
     if user_id <= 0:
-        return "Waiting for player"
+        return "等待玩家加入"
     return await _resolve_user_label(context, chat_id, user_id)
 
 
 async def publish_gomoku_game(context, chat_id: int, creator_id: int) -> dict:
     active = get_active_gomoku_game(chat_id)
     if active is not None:
-        raise ValueError("A Gomoku game is already active")
+        raise ValueError("当前已有进行中的五子棋对局")
     game = {
         "id": str(int(time.time() * 1000)),
         "creator_id": int(creator_id),
@@ -1405,7 +1405,7 @@ async def _handle_dice_commands(context, message, user, chat, cfg: dict) -> bool
         return False
     configured = str(fun_cfg.get("dice_command") or "/dice")
     normalized = text.casefold()
-    if not (_matches_command(text, configured) or normalized in {"dice", "??", "???"}):
+    if not (_matches_command(text, configured) or normalized in {"dice", "骰子", "掷骰子"}):
         return False
     cost = max(0, _counter_int(fun_cfg.get("dice_cost"), 0))
     points_cfg = cfg.get("points", {}) or {}
@@ -1416,14 +1416,14 @@ async def _handle_dice_commands(context, message, user, chat, cfg: dict) -> bool
             await _send_html_message(
                 context,
                 chat.id,
-                f"{getattr(user, 'mention_html', lambda: html.escape(str(getattr(user, 'id', 'user'))))()} needs <b>{cost}</b> points to roll the dice.",
+                f"{getattr(user, 'mention_html', lambda: html.escape(str(getattr(user, 'id', 'user'))))()} 掷骰子需要至少 <b>{cost}</b> 积分。",
                 reply_to_message_id=getattr(message, "message_id", None),
             )
             return True
         add_points(chat.id, user.id, -cost)
     await context.bot.send_dice(
         chat_id=chat.id,
-        emoji="??",
+        emoji="🎲",
         reply_to_message_id=getattr(message, "message_id", None),
     )
     return True
@@ -1438,14 +1438,14 @@ async def _handle_gomoku_commands(context, message, user, chat, cfg: dict) -> bo
         return False
     configured = str(fun_cfg.get("gomoku_command") or "/gomoku")
     normalized = text.casefold()
-    if not (_matches_command(text, configured) or normalized in {"gomoku", "???"}):
+    if not (_matches_command(text, configured) or normalized in {"gomoku", "五子棋"}):
         return False
     active = get_active_gomoku_game(chat.id)
     if active is not None:
         await _send_html_message(
             context,
             chat.id,
-            "A Gomoku game is already active in this group.",
+            "本群当前已有进行中的五子棋对局。",
             reply_to_message_id=getattr(message, "message_id", None),
         )
         return True
@@ -1504,7 +1504,7 @@ async def _handle_command_gate(context, message, chat, is_admin_user: bool, cfg:
     await _send_html_message(
         context,
         chat.id,
-        f"/{command} is disabled in this group.",
+        f"/{command} 已在本群禁用。",
         delete_after_sec=10,
         reply_to_message_id=getattr(message, "message_id", None),
     )
@@ -1537,7 +1537,7 @@ async def _handle_points_commands(context, message, user, chat, cfg: dict) -> bo
 
     if _matches_command(text, points_cfg.get("query_command", "")):
         profile = _load_points_profile(chat.id, user.id)
-        sign_status = "已签到" if profile.get("last_sign_day") == _day_stamp() else "未签到"
+        sign_status = "今日已签到" if profile.get("last_sign_day") == _day_stamp() else "今日未签到"
         rendered = f"{user.mention_html()} 的积分\n当前积分：<b>{profile.get('balance', 0)}</b>\n今日签到：{sign_status}"
         await _send_html_message(context, chat.id, rendered, reply_to_message_id=reply_to_message_id)
         return True
@@ -1643,24 +1643,25 @@ async def _handle_invite_commands(context, message, user, chat, is_admin_user: b
     return False
 
 
+# Ad keyword heuristics
 AD_KEYWORDS = (
-    "推广",
-    "兼职",
-    "刷单",
-    "博彩",
-    "赌博",
-    "代发",
-    "返佣",
-    "收群",
-    "买群",
-    "加我",
-    "联系我",
-    "客服",
-    "赚钱",
+    "promo",
+    "part-time",
+    "order",
+    "gambling",
+    "bet",
+    "agent",
+    "rebate",
+    "collect group",
+    "buy group",
+    "add me",
+    "contact me",
+    "support",
+    "make money",
     "vx",
     "wechat",
     "telegram",
-    "飞机",
+    "plane",
 )
 
 
@@ -1832,7 +1833,7 @@ async def handle_nsfw_filter(context, message, chat, is_admin_user: bool) -> boo
         await _send_html_message(
             context,
             chat.id,
-            "Suspected NSFW content was removed.",
+            "疑似 NSFW 内容已删除。",
             delete_after_sec=max(0, _counter_int(cfg.get("delay_delete_sec"), 0)),
         )
         return True
@@ -1914,11 +1915,11 @@ async def handle_gomoku_join_callback(update, context, chat_id: int, game_id: st
         await safe_answer(query, "未找到对局。", show_alert=True)
         return
     if game.get("status") != "waiting":
-        await safe_answer(query, "Game already started", show_alert=True)
+        await safe_answer(query, "对局已开始。", show_alert=True)
         return
     user_id = int(query.from_user.id)
     if user_id == int(game.get("creator_id") or 0):
-        await safe_answer(query, "Waiting for another player", show_alert=False)
+        await safe_answer(query, "请等待另一位玩家加入。", show_alert=False)
         return
     game["challenger_id"] = user_id
     game["status"] = "playing"
@@ -1937,7 +1938,7 @@ async def handle_gomoku_join_callback(update, context, chat_id: int, game_id: st
         )
     except TelegramError:
         pass
-    await safe_answer(query, "Game started", show_alert=False)
+    await safe_answer(query, "对局开始", show_alert=False)
 
 
 async def handle_gomoku_move_callback(update, context, chat_id: int, game_id: str, x: int, y: int):
@@ -1947,11 +1948,11 @@ async def handle_gomoku_move_callback(update, context, chat_id: int, game_id: st
         await safe_answer(query, "未找到对局。", show_alert=True)
         return
     if game.get("status") != "playing":
-        await safe_answer(query, "Game is not active", show_alert=True)
+        await safe_answer(query, "当前对局未在进行中。", show_alert=True)
         return
     size = int(game.get("size") or 8)
     if not (0 <= int(x) < size and 0 <= int(y) < size):
-        await safe_answer(query, "Move is out of range", show_alert=True)
+        await safe_answer(query, "落子位置超出棋盘范围。", show_alert=True)
         return
     user_id = int(query.from_user.id)
     creator_id = int(game.get("creator_id") or 0)
@@ -1959,10 +1960,10 @@ async def handle_gomoku_move_callback(update, context, chat_id: int, game_id: st
     players = {creator_id: 1, challenger_id: 2}
     piece = players.get(user_id)
     if piece is None:
-        await safe_answer(query, "You are not part of this game", show_alert=True)
+        await safe_answer(query, "你不是该对局的参与者。", show_alert=True)
         return
     if int(game.get("turn") or 1) != piece:
-        await safe_answer(query, "It is not your turn", show_alert=False)
+        await safe_answer(query, "还没轮到你落子。", show_alert=False)
         return
     board = _normalize_gomoku_board(game.get("board") or [], size)
     if int(board[int(y)][int(x)] or 0) != 0:

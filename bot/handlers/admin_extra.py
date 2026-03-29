@@ -1,6 +1,7 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import html
+import re
 import time
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -8,6 +9,7 @@ from telegram.constants import ParseMode
 
 from ..services.extra_features import get_active_lottery, load_schedule_items, parse_schedule_message_input, publish_lottery, save_schedule_items
 from ..services.membership import group_plan_label, schedule_limit_for_group
+from ..services.verified_user import build_verified_user_message_payload, normalize_verified_members, verified_member_label
 from ..storage.config_store import get_group_auto_warn, get_group_config, save_admin_state, save_group_auto_warn, save_group_config
 from ..utils.telegram import safe_answer, safe_edit_message
 
@@ -224,6 +226,7 @@ def _rich_target_meta(target: str) -> dict | None:
         "autowarn": ("自动警告文案", "admin:aw", "autowarn", "命中自动警告规则时发送。"),
         "invite_notify": ("邀请成功消息", "adminx:invite:menu", "invite", "用户通过邀请入群后发送。"),
         "related_comment": ("关联频道评论文案", "adminx:related:menu", "related", "转发关联频道消息时在评论区回复。"),
+        "verified_reply": ("认证用户消息", "adminx:verified:menu", "verified", "匹配到认证用户时发送，支持文字、图片和按钮。"),
     }
     if target in table:
         title, back, prompt_module, hint = table[target]
@@ -251,6 +254,9 @@ def get_rich_message_target(group_id: int, target: str):
     if target == "related_comment":
         cfg = get_group_config(group_id).get("related_channel", {}) or {}
         return _normalize_message_payload({"text": cfg.get("occupy_comment_text"), "photo_file_id": cfg.get("occupy_comment_photo_file_id"), "buttons": cfg.get("occupy_comment_buttons")})
+    if target == "verified_reply":
+        cfg = get_group_config(group_id).get("verified_user", {}) or {}
+        return _normalize_message_payload(build_verified_user_message_payload(cfg))
     if target.startswith("schedule:"):
         try:
             schedule_id = int(target.split(":", 1)[1])
@@ -295,6 +301,13 @@ def save_rich_message_target(group_id: int, target: str, payload: dict) -> bool:
         data = dict(cfg.get("related_channel", {}) or {})
         data.update({"occupy_comment_text": message["text"], "occupy_comment_photo_file_id": message["photo_file_id"], "occupy_comment_buttons": message["buttons"]})
         cfg["related_channel"] = data
+        save_group_config(group_id, cfg)
+        return True
+    if target == "verified_reply":
+        cfg = get_group_config(group_id)
+        data = dict(cfg.get("verified_user", {}) or {})
+        data.update({"reply_text": message["text"], "reply_photo_file_id": message["photo_file_id"], "reply_buttons": message["buttons"]})
+        cfg["verified_user"] = data
         save_group_config(group_id, cfg)
         return True
     if target.startswith("schedule:"):
@@ -507,8 +520,8 @@ async def show_fun_menu(update, context, state: dict):
         f"骰子：{_checked(cfg.get('dice_enabled', True))}",
         f"骰子积分：{int(cfg.get('dice_cost', 0) or 0)}",
         f"骰子命令：{_escape(str(cfg.get('dice_command') or '/dice'))}",
-        f"五子棋：{_checked(cfg.get('gomoku_enabled', False))}",
-        f"五子棋命令：{_escape(str(cfg.get('gomoku_command') or '/gomoku'))}",
+        f"Gomoku：{_checked(cfg.get('gomoku_enabled', False))}",
+        f"Gomoku 命令：{_escape(str(cfg.get('gomoku_command') or '/gomoku'))}",
     ]
     rows = [
         [_btn(f"{_checked(cfg.get('dice_enabled', True))} 启用骰子", "adminx:fun:toggle:dice_enabled")],
@@ -633,12 +646,36 @@ async def show_lottery_menu(update, context, state: dict):
     await _send_or_edit(update, "\n".join(lines), InlineKeyboardMarkup(rows))
 
 
+def _parse_verified_members_input(value: str) -> list[str]:
+    return normalize_verified_members(re.split(r"[,\n]", str(value or "")))
+
+
 async def show_verified_placeholder(update, context, state: dict):
     del context
     group_id = _group_id(state)
     cfg = get_group_config(group_id).get("verified_user", {}) or {}
-    rows = [[_btn(f"{_checked(cfg.get('enabled', False))} 启用认证用户模块", "adminx:verified:toggle:enabled")], [_btn("返回主菜单", "admin:main")]]
-    text = "\n".join(["认证用户", f"模块开关：{_checked(cfg.get('enabled', False))}", "当前重建版本这里只提供模块开关，详细用户管理仍在 Web 后台。"])
+    members = normalize_verified_members(cfg.get("members") or [])
+    payload = build_verified_user_message_payload(cfg)
+    preview_members = ", ".join(verified_member_label(item) for item in members[:4])
+    if len(members) > 4:
+        preview_members += f" 等 {len(members)} 个"
+    rows = [
+        [_btn(f"{_checked(cfg.get('enabled', False))} 启用认证用户模块", "adminx:verified:toggle:enabled")],
+        [_btn("设置认证账号", "adminx:verified:prompt:members")],
+        [_btn("编辑认证消息", "adminx:verified:message")],
+        [_btn("返回主菜单", "admin:main")],
+    ]
+    text = "\n".join(
+        [
+            "认证用户",
+            f"模块开关：{_checked(cfg.get('enabled', False))}",
+            f"认证账号：{len(members)}",
+            f"账号列表：{_escape(_preview(preview_members, '空', 100))}",
+            f"消息文本：{_escape(_preview(payload.get('text', ''), '空'))}",
+            f"图片：{'已设置' if payload.get('photo_file_id') else '未设置'} / 按钮：{len(payload.get('buttons', []) or [])}",
+            "支持 @username、t.me 链接或纯数字 Telegram 账号 ID。",
+        ]
+    )
     await _send_or_edit(update, text, InlineKeyboardMarkup(rows))
 
 
@@ -672,6 +709,7 @@ _PROMPT_ROUTES = {
     "adminx:fun:prompt:dice_command": ("x:fun:dice_command", "fun", "请输入骰子命令。"),
     "adminx:fun:prompt:gomoku_command": ("x:fun:gomoku_command", "fun", "请输入五子棋命令。"),
     "adminx:lottery:prompt:query_command": ("x:lottery:query_command", "lottery", "请输入抽奖查询命令。"),
+    "adminx:verified:prompt:members": ("x:verified:members", "verified", "请输入 Telegram 用户名或账号 ID，多个用逗号或换行分隔。支持 @username 或 t.me 链接。"),
 }
 
 
@@ -688,6 +726,7 @@ _VALUE_ROUTES = {
     "x:fun:dice_command": (("entertainment", "dice_command"), "fun", lambda value: value.strip() or "/dice"),
     "x:fun:gomoku_command": (("entertainment", "gomoku_command"), "fun", lambda value: value.strip() or "/gomoku"),
     "x:lottery:query_command": (("lottery", "query_command"), "lottery", lambda value: value.strip() or "lottery"),
+    "x:verified:members": (("verified_user", "members"), "verified", _parse_verified_members_input),
 }
 
 
@@ -824,6 +863,9 @@ async def handle_admin_extra_callback(update, context, state: dict) -> bool:
         return True
     if group_id and data == "adminx:related:prompt:occupy_comment_text":
         await show_rich_message_editor(update, context, state, "related_comment")
+        return True
+    if group_id and data == "adminx:verified:message":
+        await show_rich_message_editor(update, context, state, "verified_reply")
         return True
     if data in _PROMPT_ROUTES:
         next_state, module_name, prompt = _PROMPT_ROUTES[data]

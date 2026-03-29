@@ -1,4 +1,4 @@
-import importlib
+﻿import importlib
 from copy import deepcopy
 import sys
 import unittest
@@ -15,6 +15,7 @@ import bot.handlers.admin as admin_module
 import bot.handlers.admin_extra as admin_extra
 import bot.handlers.callbacks as callbacks_module
 import bot.services.extra_features as extra_features_module
+import bot.services.verified_user as verified_user_module
 import bot.services.verify as verify_service_module
 import bot.web.schemas as web_schemas_module
 import bot.web.service as web_service_module
@@ -129,6 +130,73 @@ class VerifyPromptRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(context.bot.calls, [42, -100123])
 
 
+class VerifiedUserRegressionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_handle_verified_user_reply_matches_username(self):
+        verified_service = importlib.reload(verified_user_module)
+        message = SimpleNamespace(
+            chat_id=-100123,
+            chat=SimpleNamespace(id=-100123, title="Test Group"),
+            text="联系 @Alice 获取认证",
+            caption=None,
+            entities=[],
+            caption_entities=[],
+            reply_text=AsyncMock(),
+            reply_photo=AsyncMock(),
+        )
+        user = _FallbackUser(7, "Normal User")
+        context = SimpleNamespace(bot=SimpleNamespace())
+        cfg = {
+            "verified_user": {
+                "enabled": True,
+                "members": ["alice"],
+                "reply_text": "{verifiedUser} 是本群认证会员",
+                "reply_photo_file_id": "",
+                "reply_buttons": [{"text": "查看", "type": "callback", "value": "noop", "row": 0}],
+            }
+        }
+
+        with patch.object(verified_service, "get_group_config", return_value=cfg):
+            handled = await verified_service.handle_verified_user_reply(context, message, user, message.chat)
+
+        self.assertTrue(handled)
+        message.reply_text.assert_awaited_once()
+        args = message.reply_text.await_args.args
+        kwargs = message.reply_text.await_args.kwargs
+        self.assertIn("@alice", args[0])
+        self.assertIsNotNone(kwargs["reply_markup"])
+
+    async def test_handle_verified_user_reply_matches_text_mention_id(self):
+        verified_service = importlib.reload(verified_user_module)
+        message = SimpleNamespace(
+            chat_id=-100123,
+            chat=SimpleNamespace(id=-100123, title="Test Group"),
+            text="认证一下这位",
+            caption=None,
+            entities=[SimpleNamespace(type="text_mention", user=SimpleNamespace(id=123456789))],
+            caption_entities=[],
+            reply_text=AsyncMock(),
+            reply_photo=AsyncMock(),
+        )
+        user = _FallbackUser(7, "Normal User")
+        context = SimpleNamespace(bot=SimpleNamespace())
+        cfg = {
+            "verified_user": {
+                "enabled": True,
+                "members": ["123456789"],
+                "reply_text": "{verified} 是本群认证会员",
+                "reply_photo_file_id": "",
+                "reply_buttons": [],
+            }
+        }
+
+        with patch.object(verified_service, "get_group_config", return_value=cfg):
+            handled = await verified_service.handle_verified_user_reply(context, message, user, message.chat)
+
+        self.assertTrue(handled)
+        message.reply_text.assert_awaited_once()
+        self.assertIn("123456789", message.reply_text.await_args.args[0])
+
+
 class WebhookSecurityRegressionTests(unittest.TestCase):
     def test_webhook_secret_requires_exact_match(self):
         with patch.object(tg_bot, "WEBHOOK_SECRET", "secret-token"):
@@ -215,6 +283,21 @@ class InviteAndRelatedRegressionTests(unittest.IsolatedAsyncioTestCase):
             await callbacks.callback_router(update, SimpleNamespace())
 
         query.answer.assert_awaited_once_with("details", show_alert=True)
+
+    async def test_verified_reply_callback_uses_saved_value(self):
+        callbacks = importlib.reload(callbacks_module)
+        query = SimpleNamespace(data="vub:-100123:0", answer=AsyncMock(), from_user=SimpleNamespace(id=42))
+        update = SimpleNamespace(callback_query=query)
+        cfg = {
+            "verified_user": {
+                "reply_buttons": [{"text": "Info", "type": "callback", "value": "verified-details", "row": 0}]
+            }
+        }
+
+        with patch.object(callbacks, "get_group_config", return_value=cfg):
+            await callbacks.callback_router(update, SimpleNamespace())
+
+        query.answer.assert_awaited_once_with("verified-details", show_alert=True)
 
 class RuntimeFeatureRegressionTests(unittest.IsolatedAsyncioTestCase):
     async def test_record_message_metrics_updates_points_and_activity(self):
@@ -419,8 +502,8 @@ class CryptoAndMenuRegressionTests(unittest.IsolatedAsyncioTestCase):
             text = await extra_features.fetch_spot_summary("btc")
 
         self.assertIn("BTC/USDT", text)
-        self.assertIn("Last: 65000.12 USDT", text)
-        self.assertIn("24h: +2.50%", text)
+        self.assertIn("最新价：65000.12 USDT", text)
+        self.assertIn("24h 涨跌：+2.50%", text)
 
     async def test_handle_group_commands_supports_crypto_query_alias(self):
         extra_features = importlib.reload(extra_features_module)
@@ -477,10 +560,18 @@ class CryptoAndMenuRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(handled)
         bot.delete_message.assert_awaited_once_with(chat_id=-100123, message_id=44)
 
-    async def test_verified_menu_exposes_enabled_toggle(self):
+    async def test_verified_menu_exposes_members_and_message_editor(self):
         update = SimpleNamespace(callback_query=None, effective_message=None)
         state = {"active_group_id": -100123}
-        cfg = {"verified_user": {"enabled": True}}
+        cfg = {
+            "verified_user": {
+                "enabled": True,
+                "members": ["alice", "123456789"],
+                "reply_text": "{verifiedUser} 是本群认证会员",
+                "reply_photo_file_id": "PHOTO-1",
+                "reply_buttons": [{"text": "查看", "type": "url", "value": "https://example.com", "row": 0}],
+            }
+        }
 
         with patch.object(admin_extra, "get_group_config", return_value=cfg), patch.object(
             admin_extra,
@@ -490,8 +581,11 @@ class CryptoAndMenuRegressionTests(unittest.IsolatedAsyncioTestCase):
             await admin_extra.show_verified_placeholder(update, None, state)
 
         args = send_ui.await_args.args
-        self.assertIn("Module enabled", args[1])
+        self.assertIn("认证账号：2", args[1])
+        self.assertIn("@alice", args[1])
         self.assertEqual(args[2].inline_keyboard[0][0].callback_data, "adminx:verified:toggle:enabled")
+        self.assertEqual(args[2].inline_keyboard[1][0].callback_data, "adminx:verified:prompt:members")
+        self.assertEqual(args[2].inline_keyboard[2][0].callback_data, "adminx:verified:message")
 class WebServiceRegressionTests(unittest.TestCase):
     def test_build_group_summary_reports_verified_state(self):
         web_service = importlib.reload(web_service_module)
@@ -502,7 +596,7 @@ class WebServiceRegressionTests(unittest.TestCase):
 
         verified = next(item for item in summary["modules"] if item["key"] == "verified")
         self.assertNotEqual(verified["summary"], "placeholder")
-        self.assertIn("enabled", verified["summary"])
+        self.assertIn("开启", verified["summary"])
 
     def test_build_group_summary_includes_runtime_preview_for_overview(self):
         web_service = importlib.reload(web_service_module)
@@ -567,12 +661,12 @@ class WebServiceRegressionTests(unittest.TestCase):
         lottery = next(item for item in summary["modules"] if item["key"] == "lottery")
         verified = next(item for item in summary["modules"] if item["key"] == "verified")
 
-        self.assertEqual(verify["runtime_preview"], ["2 pending", "private delivery"])
-        self.assertEqual(points["runtime_preview"], ["3 tracked", "chat points on"])
-        self.assertEqual(fun["runtime_preview"], ["dice on", "gomoku playing"])
-        self.assertEqual(lottery["runtime_preview"], ["active lottery", "3 participants"])
-        self.assertEqual(verified["runtime_preview"], ["enabled"])
-        self.assertEqual(verify["runtime_alerts"], ["No verify targets configured"])
+        self.assertEqual(verify["runtime_preview"], ["2 人待验证", "私聊发送"])
+        self.assertEqual(points["runtime_preview"], ["3 人已记录", "聊天积分 开启"])
+        self.assertEqual(fun["runtime_preview"], ["骰子 开启", "五子棋 进行中"])
+        self.assertEqual(lottery["runtime_preview"], ["抽奖进行中", "3 人参与"])
+        self.assertEqual(verified["runtime_preview"], ["已启用"])
+        self.assertEqual(verify["runtime_alerts"], ["未配置验证目标"])
     def test_build_group_summary_includes_runtime_alerts_for_risky_modules(self):
         web_service = importlib.reload(web_service_module)
         cfg = {
@@ -602,12 +696,12 @@ class WebServiceRegressionTests(unittest.TestCase):
         admin_access = next(item for item in summary["modules"] if item["key"] == "admin_access")
         schedule = next(item for item in summary["modules"] if item["key"] == "schedule")
 
-        self.assertEqual(verify["runtime_alerts"], ["No verify targets configured"])
-        self.assertEqual(admin_access["runtime_alerts"], ["Service owner is not bound"])
-        self.assertEqual(schedule["runtime_alerts"], ["Schedule limit reached", "All schedule items are disabled"])
-        self.assertEqual(verify["runtime_alert_details"], [{"severity": "error", "message": "No verify targets configured"}])
-        self.assertEqual(admin_access["runtime_alert_details"], [{"severity": "warning", "message": "Service owner is not bound"}])
-        self.assertEqual(schedule["runtime_alert_details"], [{"severity": "warning", "message": "Schedule limit reached"}, {"severity": "info", "message": "All schedule items are disabled"}])
+        self.assertEqual(verify["runtime_alerts"], ["未配置验证目标"])
+        self.assertEqual(admin_access["runtime_alerts"], ["未绑定服务主账号"])
+        self.assertEqual(schedule["runtime_alerts"], ["计划任务数量已达上限", "计划任务均已关闭"])
+        self.assertEqual(verify["runtime_alert_details"], [{"severity": "error", "message": "未配置验证目标"}])
+        self.assertEqual(admin_access["runtime_alert_details"], [{"severity": "warning", "message": "未绑定服务主账号"}])
+        self.assertEqual(schedule["runtime_alert_details"], [{"severity": "warning", "message": "计划任务数量已达上限"}, {"severity": "info", "message": "计划任务均已关闭"}])
 
 class UsdtPriceRegressionTests(unittest.IsolatedAsyncioTestCase):
     async def test_handle_group_commands_supports_usdt_query_alias(self):
@@ -635,12 +729,12 @@ class UsdtPriceRegressionTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(extra_features, "get_group_config", return_value=cfg), patch.object(
             extra_features,
             "fetch_usdt_price_summary",
-            new=AsyncMock(return_value="USDT CNY\nReference: 7.2000 CNY/USDT"),
+            new=AsyncMock(return_value="USDT 人民币\n参考价：7.2000 CNY/USDT"),
         ):
             handled = await extra_features.handle_group_commands(context, message, user, chat, False)
 
         self.assertTrue(handled)
-        message.reply_text.assert_awaited_once_with("USDT CNY\nReference: 7.2000 CNY/USDT")
+        message.reply_text.assert_awaited_once_with("USDT 人民币\n参考价：7.2000 CNY/USDT")
 
     async def test_handle_group_commands_supports_cny_to_usdt_calc(self):
         extra_features = importlib.reload(extra_features_module)
@@ -770,7 +864,7 @@ class LotteryRegressionTests(unittest.IsolatedAsyncioTestCase):
         stored = memory.data[extra_features._lottery_key(-100123, "lot-1")]
         self.assertEqual(stored["participants"], [7])
         query.edit_message_text.assert_awaited_once()
-        safe_answer.assert_awaited_once_with(query, "Joined", show_alert=False)
+        safe_answer.assert_awaited_once_with(query, "已加入抽奖。", show_alert=False)
 
     async def test_lottery_draw_callback_closes_lottery_and_clears_active(self):
         extra_features = importlib.reload(extra_features_module)
@@ -819,7 +913,7 @@ class LotteryRegressionTests(unittest.IsolatedAsyncioTestCase):
         query.edit_message_text.assert_awaited_once()
         self.assertIn("Bob", query.edit_message_text.await_args.args[0])
         context.bot.pin_chat_message.assert_awaited_once_with(chat_id=-100123, message_id=99, disable_notification=True)
-        safe_answer.assert_awaited_once_with(query, "Lottery drawn", show_alert=False)
+        safe_answer.assert_awaited_once_with(query, "开奖完成。", show_alert=False)
 
 class GomokuRegressionTests(unittest.IsolatedAsyncioTestCase):
     async def test_handle_group_commands_starts_gomoku_game(self):
@@ -828,6 +922,40 @@ class GomokuRegressionTests(unittest.IsolatedAsyncioTestCase):
         bot = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(message_id=55)))
         context = SimpleNamespace(bot=bot)
         message = SimpleNamespace(text="/gomoku", caption=None, message_id=12)
+        user = SimpleNamespace(id=7)
+        chat = SimpleNamespace(id=-100123)
+        cfg = {
+            "command_gate": {},
+            "points": {"enabled": False},
+            "activity": {"enabled": False},
+            "invite_links": {"enabled": False},
+            "entertainment": {"gomoku_enabled": True},
+            "lottery": {"enabled": False},
+            "usdt_price": {"enabled": False},
+            "crypto": {"price_query_enabled": False},
+        }
+
+        with patch.object(extra_features, "kv_get_json", side_effect=memory.get_json), patch.object(
+            extra_features,
+            "kv_set_json",
+            side_effect=memory.set_json,
+        ), patch.object(extra_features, "get_group_config", return_value=cfg):
+            handled = await extra_features.handle_group_commands(context, message, user, chat, False)
+
+        self.assertTrue(handled)
+        bot.send_message.assert_awaited_once()
+        active_id = memory.data[extra_features._gomoku_active_key(-100123)]
+        self.assertTrue(active_id)
+        stored = memory.data[extra_features._gomoku_key(-100123, active_id)]
+        self.assertEqual(stored["creator_id"], 7)
+        self.assertEqual(stored["status"], "waiting")
+
+    async def test_handle_group_commands_supports_gomoku_alias(self):
+        extra_features = importlib.reload(extra_features_module)
+        memory = _MemoryKv()
+        bot = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(message_id=56)))
+        context = SimpleNamespace(bot=bot)
+        message = SimpleNamespace(text="五子棋", caption=None, message_id=13)
         user = SimpleNamespace(id=7)
         chat = SimpleNamespace(id=-100123)
         cfg = {
@@ -895,7 +1023,7 @@ class GomokuRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stored["challenger_id"], 8)
         self.assertEqual(stored["status"], "playing")
         query.edit_message_text.assert_awaited_once()
-        safe_answer.assert_awaited_once_with(query, "Game started", show_alert=False)
+        safe_answer.assert_awaited_once_with(query, "对局开始", show_alert=False)
 
     async def test_gomoku_move_callback_finishes_win_and_clears_active(self):
         extra_features = importlib.reload(extra_features_module)
@@ -940,8 +1068,8 @@ class GomokuRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stored["status"], "finished")
         self.assertEqual(memory.data[extra_features._gomoku_active_key(-100123)], "")
         query.edit_message_text.assert_awaited_once()
-        self.assertIn("Winner", query.edit_message_text.await_args.args[0])
-        safe_answer.assert_awaited_once_with(query, "You win", show_alert=False)
+        self.assertIn("获胜者", query.edit_message_text.await_args.args[0])
+        safe_answer.assert_awaited_once_with(query, "你赢了", show_alert=False)
 
 
 class DiceAndFunRegressionTests(unittest.IsolatedAsyncioTestCase):
@@ -977,8 +1105,37 @@ class DiceAndFunRegressionTests(unittest.IsolatedAsyncioTestCase):
             handled = await extra_features.handle_group_commands(context, message, user, chat, False)
 
         self.assertTrue(handled)
-        bot.send_dice.assert_awaited_once_with(chat_id=-100123, emoji="??", reply_to_message_id=19)
+        bot.send_dice.assert_awaited_once_with(chat_id=-100123, emoji="🎲", reply_to_message_id=19)
         self.assertEqual(memory.data[extra_features._points_key(-100123, 7)]["balance"], 7)
+
+    async def test_handle_group_commands_supports_dice_alias(self):
+        extra_features = importlib.reload(extra_features_module)
+        memory = _MemoryKv()
+        bot = SimpleNamespace(send_dice=AsyncMock(return_value=SimpleNamespace(message_id=67)))
+        context = SimpleNamespace(bot=bot)
+        message = SimpleNamespace(text="骰子", caption=None, message_id=20)
+        user = SimpleNamespace(id=7, mention_html=lambda: "Alice")
+        chat = SimpleNamespace(id=-100123)
+        cfg = {
+            "command_gate": {},
+            "points": {"enabled": False},
+            "activity": {"enabled": False},
+            "invite_links": {"enabled": False},
+            "entertainment": {"dice_enabled": True, "dice_cost": 0, "dice_command": "/dice", "gomoku_enabled": False},
+            "lottery": {"enabled": False},
+            "usdt_price": {"enabled": False},
+            "crypto": {"price_query_enabled": False},
+        }
+
+        with patch.object(extra_features, "kv_get_json", side_effect=memory.get_json), patch.object(
+            extra_features,
+            "kv_set_json",
+            side_effect=memory.set_json,
+        ), patch.object(extra_features, "get_group_config", return_value=cfg):
+            handled = await extra_features.handle_group_commands(context, message, user, chat, False)
+
+        self.assertTrue(handled)
+        bot.send_dice.assert_awaited_once_with(chat_id=-100123, emoji="🎲", reply_to_message_id=20)
 
     async def test_show_fun_menu_exposes_gomoku_toggle(self):
         update = SimpleNamespace(callback_query=None, effective_message=None)
@@ -997,6 +1154,14 @@ class DiceAndFunRegressionTests(unittest.IsolatedAsyncioTestCase):
         keyboard = args[2].inline_keyboard
         self.assertEqual(keyboard[0][0].callback_data, "adminx:fun:toggle:dice_enabled")
         self.assertEqual(keyboard[2][0].callback_data, "adminx:fun:toggle:gomoku_enabled")
+
+
+class AdFilterRegressionTests(unittest.TestCase):
+    def test_contains_ad_keywords_matches_contact_patterns(self):
+        extra_features = importlib.reload(extra_features_module)
+
+        self.assertTrue(extra_features._contains_ad_keywords("QQ号: 123456"))
+        self.assertTrue(extra_features._contains_ad_keywords("vx: abcdef"))
 
 
 class WebApiSecurityRegressionTests(unittest.TestCase):
@@ -1241,6 +1406,10 @@ class WebServiceOpsEditorRegressionTests(unittest.TestCase):
             },
             "verified_user": {
                 "enabled": True,
+                "members": ["alice", "123456789"],
+                "reply_text": "{verifiedUser} 是认证用户",
+                "reply_photo_file_id": "PHOTO-9",
+                "reply_buttons": [{"text": "查看", "type": "url", "value": "https://example.com", "row": 0}],
             },
         }
 
@@ -1258,6 +1427,9 @@ class WebServiceOpsEditorRegressionTests(unittest.TestCase):
         self.assertEqual(usdt_payload["data"]["exchanges"], ["okx", "htx"])
         self.assertEqual(verified_payload["editor"], "verified")
         self.assertTrue(verified_payload["data"]["enabled"])
+        self.assertEqual(verified_payload["data"]["members"], ["alice", "123456789"])
+        self.assertEqual(verified_payload["data"]["message"]["photo_file_id"], "PHOTO-9")
+        self.assertEqual(len(verified_payload["data"]["message"]["buttons"]), 1)
 
     def test_save_module_payload_updates_points_and_usdt_editor_fields(self):
         web_service = importlib.reload(web_service_module)
@@ -1316,6 +1488,41 @@ class WebServiceOpsEditorRegressionTests(unittest.TestCase):
         self.assertFalse(usdt_cfg["show_calc_message"])
         self.assertEqual(usdt_cfg["alias_z"], "price")
         self.assertEqual(usdt_cfg["exchanges"], ["okx", "htx"])
+
+    def test_save_module_payload_updates_verified_editor_fields(self):
+        web_service = importlib.reload(web_service_module)
+        saved = {}
+
+        def _save(group_id, cfg):
+            saved.setdefault("writes", []).append((group_id, cfg))
+
+        with patch.object(web_service, "get_group_config", return_value={"verified_user": {}}), patch.object(
+            web_service,
+            "save_group_config",
+            side_effect=_save,
+        ), patch.object(web_service, "load_module_payload", return_value={"ok": True}):
+            web_service.save_module_payload(
+                -100123,
+                "verified",
+                {
+                    "data": {
+                        "enabled": True,
+                        "members": ["@Alice", "123456789", "https://t.me/Bob", "@Alice"],
+                        "message": {
+                            "text": "{verifiedUser} 是认证用户",
+                            "photo_file_id": "PHOTO-2",
+                            "buttons": [{"text": "查看", "type": "url", "value": "https://example.com", "row": 0}],
+                        },
+                    }
+                },
+            )
+
+        verified_cfg = saved["writes"][0][1]["verified_user"]
+        self.assertTrue(verified_cfg["enabled"])
+        self.assertEqual(verified_cfg["members"], ["alice", "123456789", "bob"])
+        self.assertEqual(verified_cfg["reply_text"], "{verifiedUser} 是认证用户")
+        self.assertEqual(verified_cfg["reply_photo_file_id"], "PHOTO-2")
+        self.assertEqual(len(verified_cfg["reply_buttons"]), 1)
 
 
 class WebServiceWorkflowEditorRegressionTests(unittest.TestCase):
@@ -2418,9 +2625,22 @@ class WebRuntimeBridgeRegressionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_build_module_runtime_reports_verified_state(self):
         web_service = importlib.reload(web_service_module)
-        cfg = {"group_title": "Test Group", "verified_user": {"enabled": True}}
+        cfg = {
+            "group_title": "Test Group",
+            "verified_user": {
+                "enabled": True,
+                "members": ["alice", "123456789"],
+                "reply_text": "{verifiedUser} 是认证用户",
+                "reply_photo_file_id": "PHOTO-1",
+                "reply_buttons": [{"text": "查看", "type": "callback", "value": "noop", "row": 0}],
+            },
+        }
 
         with patch.object(web_service, "get_group_config", return_value=cfg):
             runtime = await web_service.build_module_runtime(SimpleNamespace(), -100123, "verified")
 
         self.assertTrue(runtime["enabled"])
+        self.assertEqual(runtime["member_count"], 2)
+        self.assertTrue(runtime["reply_text_set"])
+        self.assertTrue(runtime["reply_photo_set"])
+        self.assertEqual(runtime["reply_button_count"], 1)

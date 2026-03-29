@@ -1,4 +1,4 @@
-﻿import html
+import html
 import datetime
 import hashlib
 import json
@@ -374,7 +374,7 @@ def load_patched_admin():
                 row = 0
             rows.append(
                 {
-                    "text": str(item.get("text") or "鎸夐挳"),
+                    "text": str(item.get("text") or "按钮"),
                     "type": str(item.get("type") or "url"),
                     "value": str(item.get("value") or ""),
                     "row": row,

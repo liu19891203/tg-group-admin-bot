@@ -33,13 +33,13 @@ class _FakeBot:
 class ScheduleRichMessageTests(unittest.IsolatedAsyncioTestCase):
     async def test_parse_schedule_message_input_supports_json_buttons(self):
         item = extra_features.parse_schedule_message_input(
-            '{"text":"?????","interval_minutes":120,"photo_file_id":"FILE-1","buttons":[{"text":"??","type":"url","value":"https://example.com","row":0}]}'
+            '{"text":"定时提醒","interval_minutes":120,"photo_file_id":"FILE-1","buttons":[{"text":"查看","type":"url","value":"https://example.com","row":0}]}'
         )
 
-        self.assertEqual(item["text"], "?????")
+        self.assertEqual(item["text"], "定时提醒")
         self.assertEqual(item["photo_file_id"], "FILE-1")
         self.assertEqual(item["interval_sec"], 7200)
-        self.assertEqual(item["buttons"][0]["text"], "??")
+        self.assertEqual(item["buttons"][0]["text"], "查看")
 
     async def test_schedule_add_accepts_photo_caption_and_saves_single_item(self):
         memory = _MemoryKv()
@@ -47,7 +47,7 @@ class ScheduleRichMessageTests(unittest.IsolatedAsyncioTestCase):
             effective_user=SimpleNamespace(id=42),
             effective_message=SimpleNamespace(
                 text=None,
-                caption='????? | 120',
+                caption='定时提醒 | 120',
                 photo=[SimpleNamespace(file_id='PHOTO-1')],
                 reply_text=AsyncMock(),
             ),
@@ -68,7 +68,7 @@ class ScheduleRichMessageTests(unittest.IsolatedAsyncioTestCase):
         key = extra_features._schedule_key(-100123)
         items = memory.data[key]
         self.assertEqual(len(items), 1)
-        self.assertEqual(items[0]["text"], "?????")
+        self.assertEqual(items[0]["text"], "定时提醒")
         self.assertEqual(items[0]["photo_file_id"], "PHOTO-1")
         self.assertEqual(items[0]["interval_sec"], 7200)
         self.assertEqual(saved_state["user_id"], 42)
@@ -79,9 +79,9 @@ class ScheduleRichMessageTests(unittest.IsolatedAsyncioTestCase):
         bot = _FakeBot()
         item = {
             "id": 12345,
-            "text": "?????",
+            "text": "定时提醒",
             "photo_file_id": "PHOTO-2",
-            "buttons": [{"text": "??", "type": "callback", "value": "????", "row": 0}],
+            "buttons": [{"text": "查看", "type": "callback", "value": "查看详情", "row": 0}],
             "interval_sec": 120,
             "next_at": 1,
             "enabled": True,
@@ -97,7 +97,7 @@ class ScheduleRichMessageTests(unittest.IsolatedAsyncioTestCase):
         kwargs = bot.send_photo.await_args.kwargs
         self.assertEqual(kwargs["chat_id"], -100123)
         self.assertEqual(kwargs["photo"], "PHOTO-2")
-        self.assertEqual(kwargs["caption"], "?????")
+        self.assertEqual(kwargs["caption"], "定时提醒")
         self.assertEqual(kwargs["reply_markup"].inline_keyboard[0][0].callback_data, 'smb:12345:-100123:0')
         saved = memory.data[extra_features._schedule_key(-100123)][0]
         self.assertEqual(saved["next_at"], 1120)
@@ -107,9 +107,9 @@ class ScheduleRichMessageTests(unittest.IsolatedAsyncioTestCase):
         memory.data[extra_features._schedule_key(-100123)] = [
             {
                 "id": 12345,
-                "text": "?????",
+                "text": "定时提醒",
                 "photo_file_id": "",
-                "buttons": [{"text": "??", "type": "callback", "value": "????", "row": 0}],
+                "buttons": [{"text": "查看", "type": "callback", "value": "查看详情", "row": 0}],
                 "interval_sec": 120,
                 "next_at": 1,
                 "enabled": True,
@@ -122,7 +122,7 @@ class ScheduleRichMessageTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(extra_features, 'kv_get_json', side_effect=memory.get_json),              patch.object(extra_features, 'kv_set_json', side_effect=memory.set_json):
             await callbacks.callback_router(update, context)
 
-        query.answer.assert_awaited_once_with('????', show_alert=True)
+        query.answer.assert_awaited_once_with('查看详情', show_alert=True)
 
 
 if __name__ == '__main__':

@@ -32,7 +32,7 @@ CALLBACK_TEXT_LIMIT = 180
 def _truncate_callback_text(text: str) -> str:
     value = (text or "").strip()
     if not value:
-        return "???????"
+        return "未设置按钮内容"
     if len(value) <= CALLBACK_TEXT_LIMIT:
         return value
     return value[: CALLBACK_TEXT_LIMIT - 3] + "..."
@@ -95,12 +95,21 @@ def _resolve_related_comment_button(group_id: int, button_idx: int):
         return buttons[button_idx]
     return None
 
+
+def _resolve_verified_reply_button(group_id: int, button_idx: int):
+    verified_cfg = get_group_config(group_id).get("verified_user", {}) or {}
+    buttons = verified_cfg.get("reply_buttons", []) or []
+    if 0 <= button_idx < len(buttons):
+        return buttons[button_idx]
+    return None
+
+
 async def handle_custom_button_callback(update, context):
     del context
     query = update.callback_query
     data = query.data or ""
     button = None
-    stale_hint = "????????????????"
+    stale_hint = "按钮内容不存在或已失效。"
     try:
         if data.startswith("wb:"):
             _, group_id, button_idx = data.split(":", 2)
@@ -121,7 +130,7 @@ async def handle_custom_button_callback(update, context):
                 _, rule_idx, group_id, button_idx = parts
                 button = _resolve_auto_reply_button(int(group_id), int(rule_idx), int(button_idx))
             elif len(parts) == 3:
-                await safe_answer(query, "????????????????????", show_alert=True)
+                await safe_answer(query, "自动回复按钮数据格式错误。", show_alert=True)
                 return
             else:
                 raise ValueError("invalid auto reply button callback")
@@ -134,6 +143,9 @@ async def handle_custom_button_callback(update, context):
         elif data.startswith("rcb:"):
             _, group_id, button_idx = data.split(":", 2)
             button = _resolve_related_comment_button(int(group_id), int(button_idx))
+        elif data.startswith("vub:"):
+            _, group_id, button_idx = data.split(":", 2)
+            button = _resolve_verified_reply_button(int(group_id), int(button_idx))
         else:
             return
     except Exception:
@@ -150,7 +162,7 @@ async def handle_custom_button_callback(update, context):
 async def handle_verify_check(update, context, chat_id: int, user_id: int):
     query = update.callback_query
     if query.from_user.id != user_id:
-        await safe_answer(query, "??????")
+        await safe_answer(query, "这不是你的验证按钮。")
         return
     cfg = get_group_config(chat_id)
     targets = get_group_targets(chat_id)
@@ -160,18 +172,18 @@ async def handle_verify_check(update, context, chat_id: int, user_id: int):
         chat = await context.bot.get_chat(chat_id)
     if session and is_session_expired(session):
         await start_verification_on_join(context, chat, query.from_user)
-        await safe_answer(query, "???????????")
+        await safe_answer(query, "验证已过期，已为你重新发送。")
         return
     missing_targets = await get_missing_verify_targets(context, query.from_user, targets)
     if not missing_targets:
-        await safe_answer(query, "????")
+        await safe_answer(query, "验证通过。")
         await complete_verification(context, chat, query.from_user)
         return
 
-    preview = "?".join(missing_targets[:3])
+    preview = "、".join(missing_targets[:3])
     if len(missing_targets) > 3:
-        preview += " ?"
-    await safe_answer(query, f"??????{preview}", show_alert=True)
+        preview += " 等"
+    await safe_answer(query, f"仍需加入：{preview}", show_alert=True)
     await send_verify_prompt(
         context,
         chat,
@@ -187,7 +199,7 @@ async def handle_verify_check(update, context, chat_id: int, user_id: int):
 async def handle_verify_answer(update, context, chat_id: int, user_id: int, index: int):
     query = update.callback_query
     if query.from_user.id != user_id:
-        await safe_answer(query, "??????")
+        await safe_answer(query, "这不是你的验证按钮。")
         return
     cfg = get_group_config(chat_id)
     session = get_verify_session(chat_id, user_id)
@@ -195,11 +207,11 @@ async def handle_verify_answer(update, context, chat_id: int, user_id: int, inde
     if chat.id != chat_id:
         chat = await context.bot.get_chat(chat_id)
     if not session or is_session_expired(session):
-        await safe_answer(query, "???????????")
+        await safe_answer(query, "验证已过期，已为你重新发送。")
         await start_verification_on_join(context, chat, query.from_user)
         return
     if int(index) == int(session.get("correct_index", -1)):
-        await safe_answer(query, "????")
+        await safe_answer(query, "验证通过。")
         await complete_verification(context, chat, query.from_user)
         return
 
@@ -207,7 +219,7 @@ async def handle_verify_answer(update, context, chat_id: int, user_id: int, inde
     max_attempts = get_verify_max_attempts(cfg)
     session["attempts"] = attempts
     if max_attempts > 0 and attempts >= max_attempts:
-        await safe_answer(query, "????????????", show_alert=True)
+        await safe_answer(query, "验证失败次数已达上限。", show_alert=True)
         await handle_verification_failure(context, chat, query.from_user, cfg, reason="max_attempts")
         clear_verify_session(chat_id, user_id)
         return
@@ -215,9 +227,9 @@ async def handle_verify_answer(update, context, chat_id: int, user_id: int, inde
     save_verify_session(chat_id, user_id, session)
     if max_attempts > 0:
         remaining = max_attempts - attempts
-        await safe_answer(query, f"????????? {remaining} ?", show_alert=True)
+        await safe_answer(query, f"回答错误，还剩 {remaining} 次机会。", show_alert=True)
         return
-    await safe_answer(query, "????????", show_alert=True)
+    await safe_answer(query, "回答错误，请重试。", show_alert=True)
 
 
 async def callback_router(update, context):
@@ -260,6 +272,6 @@ async def callback_router(update, context):
         _, _, chat_id, lottery_id = data.split(":", 3)
         await handle_lottery_draw_callback(update, context, int(chat_id), lottery_id)
         return
-    if data.startswith("vcb:") or data.startswith("wb:") or data.startswith("arb:") or data.startswith("smb:") or data.startswith("ivb:") or data.startswith("rcb:"):
+    if data.startswith("vcb:") or data.startswith("wb:") or data.startswith("arb:") or data.startswith("smb:") or data.startswith("ivb:") or data.startswith("rcb:") or data.startswith("vub:"):
         await handle_custom_button_callback(update, context)
         return

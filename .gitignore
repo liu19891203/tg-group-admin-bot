@@ -7,6 +7,9 @@
 .vscode/
 .vercel/
 __pycache__/
+pytest-cache-files-*/
+__patched_source_workspace/
+codex_tmp_dir/
 *.pyc
 *.pyo
 *.pyd
