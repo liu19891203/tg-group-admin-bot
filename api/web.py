@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 import hmac
 import json
 import os
@@ -19,7 +19,13 @@ from bot.web.auth import (
     read_session_from_cookie_header,
     verify_telegram_login,
 )
-from bot.web.login_flow import consume_web_login_request, create_web_login_request, web_login_settings
+from bot.web.login_flow import (
+    begin_bot_code_login,
+    consume_web_login_request,
+    create_web_login_request,
+    verify_bot_code_login,
+    web_login_settings,
+)
 from bot.web.permissions import ensure_group_access, get_manageable_groups
 from bot.web.schemas import list_modules
 from bot.web.service import build_group_summary, build_module_runtime, load_module_payload, render_preview, save_module_payload
@@ -122,6 +128,29 @@ async def _require_group_payload(session: dict, group_id: int, module_key: str |
 
     return await _with_bot(_action)
 
+
+async def _deliver_bot_login_code(request: dict, code: str):
+    bound_user = dict((request or {}).get('bound_user') or {})
+    chat_id = int(bound_user.get('id') or 0)
+    if chat_id <= 0 or not code:
+        raise ValueError('invalid_request')
+    group_title = str((request or {}).get('requested_group_title') or (request or {}).get('requested_group_id') or '\u672a\u6307\u5b9a\u7fa4\u7ec4')
+    origin = str((request or {}).get('origin') or '\u5f53\u524d\u7ba1\u7406\u540e\u53f0').strip()
+    text = "\n".join([
+        '\u7f51\u9875\u540e\u53f0\u767b\u5f55\u9a8c\u8bc1\u7801',
+        f'\u540e\u53f0: {origin}',
+        f'\u7fa4\u7ec4: {group_title}',
+        f'\u9a8c\u8bc1\u7801: {code}',
+        '',
+        '\u8bf7\u5728 Web \u9875\u9762\u8f93\u5165\u8fd9\u4e2a 6 \u4f4d\u9a8c\u8bc1\u7801\u5b8c\u6210\u767b\u5f55\u3002',
+        '\u5982\u679c\u4e0d\u662f\u4f60\u672c\u4eba\u64cd\u4f5c\uff0c\u8bf7\u5ffd\u7565\u8fd9\u6761\u6d88\u606f\u3002',
+    ])
+
+    async def _action(bot):
+        await bot.send_message(chat_id=chat_id, text=text)
+        return True
+
+    return await _with_bot(_action)
 
 class handler(BaseHTTPRequestHandler):
     def _allow_local_debug_login(self) -> bool:
@@ -253,6 +282,63 @@ class handler(BaseHTTPRequestHandler):
                 'expires_at': request['expires_at'],
                 'poll_interval_ms': web_login_settings()['poll_interval_ms'],
             })
+            return
+        if parsed.path == '/api/web/auth/bot-login/start':
+            try:
+                payload = self._read_json()
+            except Exception:
+                self._send_json(400, {'error': 'bad_request'})
+                return
+            result, request, code = begin_bot_code_login(
+                str(payload.get('request_id') or ''),
+                force_new_code=bool(payload.get('force_new_code')),
+            )
+            status = str(result.get('status') or '')
+            if status == 'expired':
+                self._send_json(410, {'error': 'expired'})
+                return
+            if status == 'forbidden':
+                self._send_json(403, {'error': 'forbidden'})
+                return
+            try:
+                if code:
+                    asyncio.run(_deliver_bot_login_code(request or {}, code))
+            except Exception:
+                self._send_json(500, {'error': 'delivery_failed'})
+                return
+            self._send_json(200, result)
+            return
+        if parsed.path == '/api/web/auth/bot-login/verify':
+            try:
+                payload = self._read_json()
+            except Exception:
+                self._send_json(400, {'error': 'bad_request'})
+                return
+            result = verify_bot_code_login(
+                str(payload.get('request_id') or ''),
+                str(payload.get('browser_token') or ''),
+                str(payload.get('code') or ''),
+            )
+            status = str(result.get('status') or '')
+            if status == 'approved':
+                token = issue_session(result['user'])
+                self._send_json(
+                    200,
+                    {
+                        'ok': True,
+                        'status': 'approved',
+                        'requested_group_id': result.get('requested_group_id'),
+                    },
+                    cookie_header=cookie_header_for_session(token),
+                )
+                return
+            if status == 'forbidden':
+                self._send_json(403, {'error': 'forbidden'})
+                return
+            if status == 'invalid_code':
+                self._send_json(400, {'error': 'invalid_code', 'remaining_attempts': result.get('remaining_attempts', 0)})
+                return
+            self._send_json(410, {'error': 'expired'})
             return
         if parsed.path == '/api/web/auth/poll-login':
             try:

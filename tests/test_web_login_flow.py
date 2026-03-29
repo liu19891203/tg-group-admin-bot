@@ -34,6 +34,106 @@ class WebLoginFlowTests(unittest.TestCase):
         self.assertEqual(request['origin'], 'https://example.com')
         self.assertEqual(store['web_login:abc123def4567890']['expires_at'], 1000 + login_flow.WEB_LOGIN_TTL_SEC)
 
+    def test_create_bot_entry_request_binds_user(self):
+        store = {}
+
+        def fake_set(key, value):
+            store[key] = dict(value)
+            return True
+
+        user = SimpleNamespace(id=42, username='alice', first_name='Alice', last_name='Admin')
+        with patch.object(login_flow.secrets, 'token_hex', return_value='botentry12345678'),              patch.object(login_flow.secrets, 'token_urlsafe', return_value='browser-token'),              patch.object(login_flow.time, 'time', return_value=1000),              patch.object(login_flow, 'kv_set_json', side_effect=fake_set):
+            request = login_flow.create_bot_entry_login_request(user, -10042, 'Test Group', 'https://example.com/web/?group_id=-10042')
+
+        self.assertEqual(request['mode'], 'bot_code')
+        self.assertEqual(request['bound_user']['id'], 42)
+        self.assertEqual(request['requested_group_title'], 'Test Group')
+        self.assertEqual(store['web_login:botentry12345678']['requested_group_id'], -10042)
+
+    def test_begin_and_verify_bot_code_login(self):
+        request = {
+            'request_id': 'abc123def4567890',
+            'browser_token': 'old-browser-token',
+            'status': 'pending',
+            'created_at': 1000,
+            'expires_at': 1600,
+            'requested_group_id': -10042,
+            'requested_group_title': 'Test Group',
+            'origin': 'https://example.com',
+            'approved_at': 0,
+            'user': None,
+            'mode': 'bot_code',
+            'bound_user': {'id': 42, 'username': 'alice', 'first_name': 'Alice', 'last_name': 'Admin', 'auth_date': 1000},
+            'code': '',
+            'code_expires_at': 0,
+            'code_sent_at': 0,
+            'attempts': 0,
+        }
+        store = {'web_login:abc123def4567890': dict(request)}
+
+        def fake_get(key, default=None):
+            value = store.get(key)
+            if value is None:
+                return default
+            return dict(value)
+
+        def fake_set(key, value):
+            store[key] = dict(value)
+            return True
+
+        def fake_del(key):
+            store.pop(key, None)
+            return True
+
+        with patch.object(login_flow.time, 'time', return_value=1100),              patch.object(login_flow.secrets, 'token_urlsafe', return_value='new-browser-token'),              patch.object(login_flow.secrets, 'randbelow', return_value=123456),              patch.object(login_flow, 'kv_get_json', side_effect=fake_get),              patch.object(login_flow, 'kv_set_json', side_effect=fake_set),              patch.object(login_flow, 'kv_del', side_effect=fake_del):
+            started, saved_request, code = login_flow.begin_bot_code_login('abc123def4567890')
+            verified = login_flow.verify_bot_code_login('abc123def4567890', 'new-browser-token', '123456')
+
+        self.assertEqual(started['status'], 'code_required')
+        self.assertEqual(started['delivery'], 'sent')
+        self.assertEqual(code, '123456')
+        self.assertEqual(saved_request['browser_token'], 'new-browser-token')
+        self.assertEqual(verified['status'], 'approved')
+        self.assertEqual(verified['user']['username'], 'alice')
+        self.assertNotIn('web_login:abc123def4567890', store)
+
+    def test_verify_bot_code_rejects_wrong_code(self):
+        request = {
+            'request_id': 'abc123def4567890',
+            'browser_token': 'browser-token',
+            'status': 'pending',
+            'created_at': 1000,
+            'expires_at': 1600,
+            'requested_group_id': -10042,
+            'requested_group_title': 'Test Group',
+            'origin': 'https://example.com',
+            'approved_at': 0,
+            'user': None,
+            'mode': 'bot_code',
+            'bound_user': {'id': 42, 'username': 'alice', 'first_name': 'Alice', 'last_name': 'Admin', 'auth_date': 1000},
+            'code': '123456',
+            'code_expires_at': 1400,
+            'code_sent_at': 1100,
+            'attempts': 0,
+        }
+        store = {'web_login:abc123def4567890': dict(request)}
+
+        def fake_get(key, default=None):
+            value = store.get(key)
+            if value is None:
+                return default
+            return dict(value)
+
+        def fake_set(key, value):
+            store[key] = dict(value)
+            return True
+
+        with patch.object(login_flow.time, 'time', return_value=1110),              patch.object(login_flow, 'kv_get_json', side_effect=fake_get),              patch.object(login_flow, 'kv_set_json', side_effect=fake_set):
+            result = login_flow.verify_bot_code_login('abc123def4567890', 'browser-token', '000000')
+
+        self.assertEqual(result['status'], 'invalid_code')
+        self.assertEqual(result['remaining_attempts'], login_flow.WEB_LOGIN_CODE_MAX_ATTEMPTS - 1)
+
     def test_approve_and_consume_request(self):
         request = {
             'request_id': 'abc123def4567890',

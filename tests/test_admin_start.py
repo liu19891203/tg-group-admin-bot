@@ -93,6 +93,10 @@ class AdminStartTests(unittest.IsolatedAsyncioTestCase):
             admin_mod,
             "_web_admin_base_url",
             new=AsyncMock(return_value="https://admin.example/web/"),
+        ), patch.object(
+            admin_mod,
+            "create_bot_entry_login_request",
+            return_value={"request_id": "bot-login-1"},
         ):
             await show_group_select(update, context, {})
 
@@ -102,7 +106,7 @@ class AdminStartTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first_row[0].text, "\u7eb5\u6a2a\u96c6\u56e2\u4e00\u7fa4")
         self.assertEqual(first_row[0].callback_data, "admin:select_group:-100123")
         self.assertEqual(first_row[1].text, "\U0001f310 \u8fdb\u5165Web")
-        self.assertEqual(first_row[1].url, "https://admin.example/web/?group_id=-100123")
+        self.assertEqual(first_row[1].url, "https://admin.example/web/?group_id=-100123&bot_login=bot-login-1")
 
 
     async def test_show_autodelete_menu_explains_check_and_cross(self):

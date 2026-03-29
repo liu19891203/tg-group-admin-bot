@@ -19,6 +19,12 @@ def _append_group_id(module, url: str, group_id: int) -> str:
     return urlunsplit((parts.scheme, parts.netloc, parts.path or "/web/", urlencode(query), parts.fragment))
 
 
+def _append_bot_login_request(module, url: str, request_id: str) -> str:
+    parts = urlsplit(module.normalize_url(url))
+    query = dict(parse_qsl(parts.query, keep_blank_values=True))
+    if request_id:
+        query["bot_login"] = str(request_id)
+    return urlunsplit((parts.scheme, parts.netloc, parts.path or "/web/", urlencode(query), parts.fragment))
 def _toggle_notice(enabled: bool) -> str:
     return "\u5df2\u6253\u5f00" if enabled else "\u5df2\u5173\u95ed"
 
@@ -1151,13 +1157,22 @@ def load_patched_admin():
         rows = []
         for group in groups:
             group_id = int(group.get("id"))
+            login_request = module.create_bot_entry_login_request(
+                update.effective_user,
+                requested_group_id=group_id,
+                requested_group_title=str(group.get("title", str(group_id))),
+                origin=web_base_url,
+            )
             rows.append(
                 [
                     module.InlineKeyboardButton(
                         group.get("title", str(group_id)),
                         callback_data=f"admin:select_group:{group_id}",
                     ),
-                    module._url_btn("\U0001f310 \u8fdb\u5165Web", _append_group_id(module, web_base_url, group_id)),
+                    module._url_btn(
+                        "\U0001f310 \u8fdb\u5165Web",
+                        _append_bot_login_request(module, _append_group_id(module, web_base_url, group_id), str(login_request.get("request_id") or "")),
+                    ),
                 ]
             )
         if not rows:
@@ -2495,4 +2510,3 @@ def load_patched_admin():
     callbacks.callback_router = callback_router
     module._runtime_patch_admin_applied = True
     return module
-

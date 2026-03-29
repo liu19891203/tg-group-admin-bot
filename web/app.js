@@ -10,6 +10,8 @@ const state = {
   noticeType: '',
   previewHtml: '',
   loginRequest: null,
+  botLoginRequestId: null,
+  botCodeLogin: null,
 };
 
 const root = document.getElementById('app');
@@ -31,6 +33,17 @@ function readRequestedGroupId() {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function readBotLoginRequestId() {
+  return String(new URLSearchParams(window.location.search).get('bot_login') || '').trim();
+}
+
+function clearBotLoginLocation() {
+  if (!state.botLoginRequestId) return;
+  const url = new URL(window.location.href);
+  url.searchParams.delete('bot_login');
+  window.history.replaceState({}, '', url);
+  state.botLoginRequestId = '';
+}
 function syncGroupLocation() {
   const url = new URL(window.location.href);
   if (state.currentGroupId == null) {
@@ -42,6 +55,7 @@ function syncGroupLocation() {
 }
 
 state.requestedGroupId = readRequestedGroupId();
+state.botLoginRequestId = readBotLoginRequestId();
 const BUTTON_TYPE_LABELS = {
   url: 'URL 链接',
   callback: '回调指令',
@@ -147,16 +161,18 @@ function escapeHtml(value) {
     .replaceAll("'", '&#39;');
 }
 
-function humanizeErrorMessage(message, fallback = '操作失败，请重试') {
+function humanizeErrorMessage(message, fallback = '\u64cd\u4f5c\u5931\u8d25\uff0c\u8bf7\u91cd\u8bd5') {
   const value = String(message || '').trim();
   if (!value) return fallback;
   const mapped = {
-    bad_request: '请求格式不正确，请刷新后重试。',
-    forbidden: '当前登录请求无效，请重新发起。',
-    expired: '登录请求已过期，请重新发起。',
-    invalid_local_debug_secret: '调试口令不正确。',
-    invalid_telegram_login: 'Telegram 登录失败，请重试。',
-    unauthorized: '登录状态已失效，请重新登录。',
+    bad_request: '\u8bf7\u6c42\u683c\u5f0f\u4e0d\u6b63\u786e\uff0c\u8bf7\u5237\u65b0\u540e\u91cd\u8bd5\u3002',
+    forbidden: '\u5f53\u524d\u767b\u5f55\u8bf7\u6c42\u65e0\u6548\uff0c\u8bf7\u91cd\u65b0\u4ece Telegram \u79c1\u804a\u8fdb\u5165 Web\u3002',
+    expired: '\u767b\u5f55\u8bf7\u6c42\u5df2\u8fc7\u671f\uff0c\u8bf7\u91cd\u65b0\u4ece Telegram \u79c1\u804a\u8fdb\u5165 Web\u3002',
+    invalid_code: '\u9a8c\u8bc1\u7801\u4e0d\u6b63\u786e\uff0c\u8bf7\u91cd\u65b0\u8f93\u5165\u3002',
+    delivery_failed: '\u65e0\u6cd5\u901a\u8fc7 Telegram \u79c1\u804a\u53d1\u9001\u9a8c\u8bc1\u7801\uff0c\u8bf7\u7a0d\u540e\u518d\u8bd5\u3002',
+    invalid_local_debug_secret: '\u8c03\u8bd5\u53e3\u4ee4\u4e0d\u6b63\u786e\u3002',
+    invalid_telegram_login: 'Telegram \u767b\u5f55\u5931\u8d25\uff0c\u8bf7\u91cd\u8bd5\u3002',
+    unauthorized: '\u767b\u5f55\u72b6\u6001\u5df2\u5931\u6548\uff0c\u8bf7\u91cd\u65b0\u767b\u5f55\u3002',
   };
   return mapped[value] || fallback;
 }
@@ -278,7 +294,11 @@ async function loadSession() {
       syncGroupLocation();
       await loadGroup(state.currentGroupId, state.currentModuleKey);
     }
+    state.botCodeLogin = null;
     clearLoginRequest();
+    if (state.botLoginRequestId) {
+      clearBotLoginLocation();
+    }
   } catch (error) {
     if (error.status === 401) {
       state.me = null;
@@ -392,20 +412,52 @@ function renderRemoteLoginPanel() {
     </div>`;
 }
 
+function renderBotCodeLoginPanel() {
+  const flow = state.botCodeLogin || {};
+  const expiresAt = Number(flow.expires_at || 0);
+  const remainingSec = expiresAt > 0 ? Math.max(0, Math.ceil((expiresAt * 1000 - Date.now()) / 1000)) : 0;
+  if (!flow.browser_token) {
+    return `
+      <div class="login-widget-box local-debug-box">
+        <div class="subtle">\u9875\u9762\u5df2\u7ecf\u8bc6\u522b\u5230\u8fd9\u662f\u4ece\u673a\u5668\u4eba\u79c1\u804a\u8fdb\u5165\u7684\u767b\u5f55\u8bf7\u6c42\u3002\u70b9\u51fb\u4e0b\u65b9\u6309\u94ae\u540e\uff0c\u673a\u5668\u4eba\u4f1a\u628a 6 \u4f4d\u9a8c\u8bc1\u7801\u53d1\u5230\u5f53\u524d Telegram \u8d26\u53f7\u3002</div>
+        <div class="inline-actions">
+          <button class="secondary-btn" data-action="resend-bot-login-code">\u53d1\u9001\u9a8c\u8bc1\u7801</button>
+        </div>
+      </div>`;
+  }
+  return `
+    <div class="login-widget-box local-debug-box">
+      <div class="subtle">\u9a8c\u8bc1\u7801\u5df2\u53d1\u9001\u5230\u5f53\u524d Telegram \u79c1\u804a\uff0c\u8bf7\u628a 6 \u4f4d\u9a8c\u8bc1\u7801\u586b\u5230\u4e0b\u9762\u3002</div>
+      <div class="subtle">\u9a8c\u8bc1\u7801\u5269\u4f59\u65f6\u95f4: ${escapeHtml(String(remainingSec))} \u79d2</div>
+      <input type="text" id="bot-login-code" maxlength="6" inputmode="numeric" placeholder="\u8f93\u5165 6 \u4f4d\u9a8c\u8bc1\u7801" />
+      <div class="inline-actions">
+        <button class="primary-btn" data-action="verify-bot-login-code">\u9a8c\u8bc1\u767b\u5f55</button>
+        <button class="secondary-btn" data-action="resend-bot-login-code">\u91cd\u65b0\u53d1\u9001</button>
+      </div>
+    </div>`;
+}
 function renderLoginPanel() {
   const localDebug = state.bootstrap?.local_debug_login || {};
   if (isLoopbackHost()) {
     if (!localDebug.enabled) {
       return `
         <div class="login-widget-box local-debug-box">
-          <div class="subtle">本机调试登录未开启。请在当前机器上设置 <code>WEB_LOCAL_DEBUG_LOGIN_ENABLED=1</code> 和 <code>WEB_LOCAL_DEBUG_LOGIN_SECRET</code> 后再使用。</div>
+          <div class="subtle">\u672c\u673a\u8c03\u8bd5\u767b\u5f55\u672a\u5f00\u542f\u3002\u8bf7\u5728\u5f53\u524d\u673a\u5668\u4e0a\u8bbe\u7f6e <code>WEB_LOCAL_DEBUG_LOGIN_ENABLED=1</code> \u548c <code>WEB_LOCAL_DEBUG_LOGIN_SECRET</code> \u540e\u518d\u4f7f\u7528\u3002</div>
         </div>`;
     }
     return `
       <div class="login-widget-box local-debug-box">
-        <div class="subtle">公网环境已切换为 Telegram bot 确认登录。本机调试模式仍然保留口令登录。</div>
-        <input type="password" id="local-debug-secret" placeholder="请输入本机调试口令" />
-        <button class="primary-btn" data-action="local-debug-login">使用本机调试登录</button>
+        <div class="subtle">\u516c\u7f51\u73af\u5883\u5df2\u5207\u6362\u4e3a Telegram bot \u786e\u8ba4\u767b\u5f55\u3002\u672c\u673a\u8c03\u8bd5\u6a21\u5f0f\u4ecd\u7136\u4fdd\u7559\u53e3\u4ee4\u767b\u5f55\u3002</div>
+        <input type="password" id="local-debug-secret" placeholder="\u8bf7\u8f93\u5165\u672c\u673a\u8c03\u8bd5\u53e3\u4ee4" />
+        <button class="primary-btn" data-action="local-debug-login">\u4f7f\u7528\u672c\u673a\u8c03\u8bd5\u767b\u5f55</button>
+      </div>`;
+  }
+  if (state.botLoginRequestId) {
+    return `
+      ${renderBotCodeLoginPanel()}
+      <div class="soft-panel">
+        <div class="subtle">\u8fd9\u6b21\u767b\u5f55\u8bf7\u6c42\u5df2\u7ecf\u7ed1\u5b9a\u5230\u4f60\u70b9\u51fb\u6309\u94ae\u65f6\u7684 Telegram \u8d26\u53f7\uff0c\u65e0\u9700\u8f93\u5165\u624b\u673a\u53f7\u6216\u77ed\u4fe1\u9a8c\u8bc1\u7801\u3002</div>
+        ${renderRemoteLoginPanel()}
       </div>`;
   }
   return renderRemoteLoginPanel();
@@ -416,23 +468,23 @@ function renderLogin() {
   root.innerHTML = `
     <div class="login-shell">
       <div class="login-card">
-        <span class="hero-tag">浅蓝风格管理后台</span>
-        <h1 class="hero-title">群组管理后台</h1>
-        <p class="hero-copy">后台登录已改为 Telegram bot 一键确认。浏览器发起请求后，请在 Telegram 里用当前账号确认，无需输入手机号和验证码。</p>
+        <span class="hero-tag">Telegram Bot \u540e\u53f0</span>
+        <h1 class="hero-title">\u7fa4\u7ec4\u7ba1\u7406\u540e\u53f0</h1>
+        <p class="hero-copy">\u4ece\u673a\u5668\u4eba\u79c1\u804a\u91cc\u70b9\u51fb\u201c\u8fdb\u5165Web\u201d\u540e\uff0c\u7cfb\u7edf\u4f1a\u628a\u9a8c\u8bc1\u7801\u53d1\u5230\u540c\u4e00\u4e2a Telegram \u8d26\u53f7\u7684\u79c1\u804a\u91cc\uff0c\u4f60\u53ea\u9700\u586b\u5199\u8fd9\u4e2a\u673a\u5668\u4eba\u9a8c\u8bc1\u7801\uff0c\u4e0d\u9700\u624b\u673a\u53f7\u6216\u77ed\u4fe1\u9a8c\u8bc1\u7801\u3002</p>
         <div class="login-grid">
           <div class="soft-panel">
-            <h3 class="section-title">当前能力</h3>
+            <h3 class="section-title">\u5f53\u524d\u80fd\u529b</h3>
             <ul class="bullet-list">
-              <li>Telegram 私聊确认登录</li>
-              <li>24 个模块导航</li>
-              <li>浅蓝风格后台界面</li>
-              <li>消息预览面板</li>
-              <li>统一消息编辑器</li>
-              <li>保存后立即生效</li>
+              <li>Telegram \u79c1\u804a\u7ed1\u5b9a\u767b\u5f55</li>
+              <li>\u673a\u5668\u4eba\u79c1\u804a\u9a8c\u8bc1\u7801\u767b\u5f55</li>
+              <li>24 \u4e2a\u6a21\u5757\u5bfc\u822a</li>
+              <li>\u6d88\u606f\u9884\u89c8\u9762\u677f</li>
+              <li>\u7edf\u4e00\u6d88\u606f\u7f16\u8f91\u5668</li>
+              <li>\u4fdd\u5b58\u540e\u7acb\u5373\u751f\u6548</li>
             </ul>
           </div>
           <div class="soft-panel">
-            <h3 class="section-title">登录</h3>
+            <h3 class="section-title">\u767b\u5f55</h3>
             ${renderLoginPanel()}
             <div data-notice-host>${renderNotice()}</div>
           </div>
@@ -481,6 +533,64 @@ async function openWebLoginTelegram() {
   window.open(loginUrl, '_blank', 'noopener');
 }
 
+async function startBotCodeLogin({ forceNewCode = false } = {}) {
+  const requestId = String(state.botLoginRequestId || '').trim();
+  if (!requestId) return;
+  try {
+    clearNotice();
+    state.botCodeLogin = { request_id: requestId, status: 'sending', browser_token: '' };
+    render();
+    const result = await api('/api/web/auth/bot-login/start', {
+      method: 'POST',
+      body: JSON.stringify({
+        request_id: requestId,
+        force_new_code: Boolean(forceNewCode),
+      }),
+    });
+    state.botCodeLogin = { ...result, status: 'code_required' };
+    render();
+    showNotice(
+      result.delivery === 'sent'
+        ? '\u9a8c\u8bc1\u7801\u5df2\u901a\u8fc7\u673a\u5668\u4eba\u79c1\u804a\u53d1\u9001\uff0c\u8bf7\u67e5\u6536\u3002'
+        : '\u9a8c\u8bc1\u7801\u4ecd\u7136\u6709\u6548\uff0c\u8bf7\u76f4\u63a5\u4f7f\u7528\u673a\u5668\u4eba\u79c1\u804a\u91cc\u7684\u9a8c\u8bc1\u7801\u767b\u5f55\u3002',
+      'ok',
+    );
+  } catch (error) {
+    state.botCodeLogin = { request_id: requestId, status: 'error', browser_token: '' };
+    render();
+    showNotice(humanizeErrorMessage(error.message, '\u53d1\u9001\u9a8c\u8bc1\u7801\u5931\u8d25\uff0c\u8bf7\u91cd\u8bd5\u3002'), 'error');
+  }
+}
+
+async function verifyBotCodeLogin() {
+  const requestId = String(state.botLoginRequestId || '').trim();
+  const browserToken = String(state.botCodeLogin?.browser_token || '').trim();
+  const code = String(document.getElementById('bot-login-code')?.value || '').trim();
+  if (!requestId || !browserToken) {
+    showNotice('\u5f53\u524d\u767b\u5f55\u8bf7\u6c42\u65e0\u6548\uff0c\u8bf7\u91cd\u65b0\u4ece Telegram \u79c1\u804a\u8fdb\u5165 Web\u3002', 'error');
+    return;
+  }
+  if (!/^\d{6}$/.test(code)) {
+    showNotice('\u8bf7\u8f93\u5165 6 \u4f4d\u9a8c\u8bc1\u7801', 'error');
+    return;
+  }
+  try {
+    clearNotice();
+    await api('/api/web/auth/bot-login/verify', {
+      method: 'POST',
+      body: JSON.stringify({
+        request_id: requestId,
+        browser_token: browserToken,
+        code,
+      }),
+    });
+    state.botCodeLogin = null;
+    await loadSession();
+    render();
+  } catch (error) {
+    showNotice(humanizeErrorMessage(error.message, '\u9a8c\u8bc1\u7801\u9a8c\u8bc1\u5931\u8d25\uff0c\u8bf7\u91cd\u8bd5\u3002'), 'error');
+  }
+}
 async function pollWebLoginStatus() {
   if (!state.loginRequest?.request_id || !state.loginRequest?.browser_token) return;
   try {
@@ -2153,6 +2263,9 @@ async function boot() {
   try {
     await loadBootstrap();
     await loadSession();
+    if (!state.me && state.botLoginRequestId) {
+      await startBotCodeLogin();
+    }
   } catch (error) {
     state.notice = error.message || 'boot failed';
     state.noticeType = 'error';
@@ -2191,6 +2304,14 @@ document.addEventListener('click', async (event) => {
     await openWebLoginTelegram();
     return;
   }
+  if (action === 'verify-bot-login-code') {
+    await verifyBotCodeLogin();
+    return;
+  }
+  if (action === 'resend-bot-login-code') {
+    await startBotCodeLogin({ forceNewCode: true });
+    return;
+  }
   if (action === 'local-debug-login') {
     await localDebugLogin();
     return;
@@ -2200,7 +2321,11 @@ document.addEventListener('click', async (event) => {
     state.me = null;
     state.summary = null;
     state.modulePayload = null;
+    state.botCodeLogin = null;
     clearLoginRequest();
+    if (state.botLoginRequestId) {
+      clearBotLoginLocation();
+    }
     clearNotice();
     render();
     return;
@@ -2303,4 +2428,3 @@ document.addEventListener('click', async (event) => {
 });
 
 boot();
-

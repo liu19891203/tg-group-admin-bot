@@ -36,6 +36,7 @@ from ..storage.config_store import (
 )
 from ..utils.telegram import get_bot_username, is_admin, normalize_url, safe_answer, safe_edit_message
 from .private_home import handle_private_home_callback, handle_private_home_message, show_private_home
+from ..web.login_flow import create_bot_entry_login_request
 from ..web.login_bot import parse_web_login_start_arg, show_web_login_prompt
 
 SUPER_ADMIN_ID = model_config.SUPER_ADMIN_ID
@@ -322,6 +323,14 @@ def _append_group_id(url: str, group_id: int) -> str:
 
 
 
+def _append_bot_login_request(url: str, request_id: str) -> str:
+    if not url:
+        return ""
+    parts = urlsplit(normalize_url(url))
+    query = dict(parse_qsl(parts.query, keep_blank_values=True))
+    if request_id:
+        query["bot_login"] = str(request_id)
+    return urlunsplit((parts.scheme, parts.netloc, parts.path or "/web/", urlencode(query), parts.fragment))
 async def _web_admin_base_url(context) -> str:
     configured = normalize_url(os.environ.get("WEB_APP_URL", "").strip())
     if configured:
@@ -405,7 +414,13 @@ async def show_group_select(update, context, state: dict | None = None, note: st
         group_id = int(group.get("id") or 0)
         row = [_btn(group.get("title") or group_id, f"admin:select_group:{group_id}")]
         if web_base_url:
-            row.append(_url_btn("🌐 进入Web", _append_group_id(web_base_url, group_id)))
+            login_request = create_bot_entry_login_request(
+                update.effective_user,
+                requested_group_id=group_id,
+                requested_group_title=str(group.get("title") or group_id),
+                origin=web_base_url,
+            )
+            row.append(_url_btn("🌐 进入Web", _append_bot_login_request(_append_group_id(web_base_url, group_id), str(login_request.get("request_id") or ""))))
         rows.append(row)
     if not rows:
         rows.append([_btn("暂无群组", "admin:none")])
