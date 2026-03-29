@@ -29,6 +29,26 @@ class _FakeBot:
 
 
 class AdminStartTests(unittest.IsolatedAsyncioTestCase):
+    async def test_start_in_group_replies_with_private_chat_hint(self):
+        message = _FakeMessage()
+        update = SimpleNamespace(
+            effective_user=SimpleNamespace(id=42),
+            effective_chat=SimpleNamespace(id=-100123, type="supergroup"),
+            effective_message=message,
+            callback_query=None,
+        )
+        context = SimpleNamespace(bot=_FakeBot())
+
+        with patch.object(admin_mod, "_save_state") as save_state:
+            await admin_start(update, context)
+
+        save_state.assert_not_called()
+        self.assertEqual(len(message.calls), 1)
+        self.assertIn("私聊机器人发送 /start", message.calls[0]["text"])
+        markup = message.calls[0]["kwargs"]["reply_markup"]
+        self.assertEqual(markup.inline_keyboard[0][0].text, "私聊机器人")
+        self.assertEqual(markup.inline_keyboard[0][0].url, "https://t.me/test_bot?start=from_group")
+
     async def test_start_resets_admin_state_and_sends_private_home(self):
         message = _FakeMessage()
         update = SimpleNamespace(
