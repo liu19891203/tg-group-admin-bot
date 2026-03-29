@@ -1,4 +1,4 @@
-import asyncio
+﻿import asyncio
 import hmac
 import json
 import os
@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 
 from bot.app import build_app
 from bot.models.config import SUPER_ADMIN_ID
+from bot.storage.kv import KV_ENABLED
 from bot.web.auth import (
     build_local_debug_login,
     cookie_header_for_logout,
@@ -31,6 +32,14 @@ STATIC_TYPES = {
 }
 GROUP_SUMMARY_RE = re.compile(r'^/api/web/groups/(-?\d+)/summary$')
 GROUP_MODULE_RE = re.compile(r'^/api/web/groups/(-?\d+)/module/([a-z_]+)$')
+
+
+def build_health_payload() -> dict:
+    return {
+        'ok': True,
+        'service': 'admin-web',
+        'kv_enabled': KV_ENABLED,
+    }
 
 
 def local_debug_login_settings() -> dict:
@@ -166,6 +175,9 @@ class handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         parsed = urlparse(self.path)
+        if parsed.path in {'/healthz', '/api/web/health'}:
+            self._send_json(200, build_health_payload())
+            return
         if self._serve_static(parsed.path):
             return
         if parsed.path == '/api/web/bootstrap':

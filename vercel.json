@@ -15,6 +15,10 @@
       "dest": "api/tg_bot.py"
     },
     {
+      "src": "/healthz",
+      "dest": "api/web.py"
+    },
+    {
       "src": "/api/web/(.*)",
       "dest": "api/web.py"
     },
