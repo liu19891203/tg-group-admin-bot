@@ -931,19 +931,6 @@ async def show_antispam_menu(update, context, state: dict | None = None, note: s
 
 async def admin_start(update, context):
     if getattr(update.effective_chat, "type", "") != "private":
-        username = await get_bot_username(context)
-        private_url = f"https://t.me/{str(username).lstrip('@')}?start=from_group" if username else None
-        reply_markup = None
-        if private_url:
-            reply_markup = InlineKeyboardMarkup(
-                [[InlineKeyboardButton("私聊机器人", url=private_url)]]
-            )
-        if update.effective_message:
-            await update.effective_message.reply_text(
-                "请先私聊机器人发送 /start，再进入后台或继续群管理设置。",
-                reply_markup=reply_markup,
-                disable_web_page_preview=True,
-            )
         return
     web_login_request_id = parse_web_login_start_arg((getattr(context, "args", None) or [None])[0])
     user_id = update.effective_user.id
